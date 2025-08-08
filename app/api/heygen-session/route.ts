@@ -1,21 +1,22 @@
 // /app/api/heygen-session/route.ts
 export const runtime = 'nodejs';
 
+/** GET: sanity check — shows how many avatars your key sees */
 export async function GET() {
   const apiKey = process.env.HEYGEN_API_KEY || '';
   const r = await fetch('https://api.heygen.com/v2/avatars', {
     headers: { 'Accept': 'application/json', 'X-Api-Key': apiKey },
   });
   const j = await r.json().catch(() => ({}));
-  const count = Array.isArray(j?.data) ? j.data.length : 0;
+  const count = Array.isArray(j?.data) ? j.data.length : (Array.isArray(j?.avatars?.avatars) ? j.avatars.avatars.length : 0);
   return new Response(JSON.stringify({
     ok: r.ok, status: r.status,
     endpoint_used: 'https://api.heygen.com/v2/avatars',
-    count,
-    avatars: j?.data ?? [],
+    count
   }), { status: 200, headers: { 'Content-Type': 'application/json' }});
 }
 
+/** POST: create a Streaming session for an avatar */
 export async function POST(request: Request) {
   const apiKey = process.env.HEYGEN_API_KEY;
   if (!apiKey) return jsonErr('Missing HEYGEN_API_KEY', 500);
@@ -27,23 +28,18 @@ export async function POST(request: Request) {
     quality?: 'high'|'medium'|'low';
   };
 
-  // 1) Resolve avatar_id (prefer explicit, else env, else lookup by name)
-  let avatar_id = body.avatarId || process.env.HEYGEN_AVATAR_ID || '';
-  const avatarName = body.avatarName?.trim();
+  // Resolve avatar id: explicit → env → (optionally by name)
+  let avatarId = body.avatarId || process.env.HEYGEN_AVATAR_ID || '';
+  const avatarName = (body.avatarName || '').trim();
 
-  if (!avatar_id && avatarName) {
-    const found = await findAvatarIdByName(apiKey, avatarName);
-    if (found) avatar_id = found;
+  if (!avatarId && avatarName) {
+    avatarId = await findAvatarIdByName(apiKey, avatarName) || '';
   }
-  if (!avatar_id) {
-    return jsonErr('Missing avatar_id. Provide avatarId or avatarName, or set HEYGEN_AVATAR_ID.', 400);
-  }
+  if (!avatarId) return jsonErr('Missing avatar_id. Provide avatarId or set HEYGEN_AVATAR_ID.', 400);
 
-  // 2) Build payload and call streaming.new (v2)
-  const payload: any = { avatar_id, quality: body.quality || 'high' };
-  if (body.voiceId || process.env.HEYGEN_VOICE_ID) {
-    payload.voice = { voice_id: body.voiceId || process.env.HEYGEN_VOICE_ID };
-  }
+  const payload: any = { avatar_id: avatarId, quality: body.quality || 'high' };
+  const voiceId = body.voiceId || process.env.HEYGEN_VOICE_ID;
+  if (voiceId) payload.voice = { voice_id: voiceId };
 
   const url = 'https://api.heygen.com/v2/streaming.new';
   const r = await fetch(url, {
@@ -65,15 +61,15 @@ export async function POST(request: Request) {
       parsed_json: json,
     }), { status: 500, headers: { 'Content-Type': 'application/json' }});
   }
+
+  // Success — return whatever HeyGen returns (usually data.{ session_id, access_token, url/realtime_endpoint, player_url? })
   return new Response(JSON.stringify({ ok: true, endpoint_used: url, data: json?.data ?? json }), {
     status: 200, headers: { 'Content-Type': 'application/json' }
   });
 }
 
 function jsonErr(msg: string, status = 400) {
-  return new Response(JSON.stringify({ error: msg }), {
-    status, headers: { 'Content-Type': 'application/json' }
-  });
+  return new Response(JSON.stringify({ error: msg }), { status, headers: { 'Content-Type': 'application/json' }});
 }
 
 async function findAvatarIdByName(apiKey: string, name: string): Promise<string | null> {
@@ -81,9 +77,12 @@ async function findAvatarIdByName(apiKey: string, name: string): Promise<string 
     headers: { 'Accept': 'application/json', 'X-Api-Key': apiKey },
   });
   const j = await r.json().catch(() => ({}));
-  const list: any[] = Array.isArray(j?.data) ? j.data : [];
+  const list: any[] =
+    (Array.isArray(j?.data) && j.data) ||
+    (Array.isArray(j?.avatars?.avatars) && j.avatars.avatars) ||
+    [];
   const match = list.find(a =>
-    (a?.name || a?.display_name || '').toLowerCase() === name.toLowerCase()
+    (a?.avatar_name || a?.name || a?.display_name || '').toLowerCase() === name.toLowerCase()
   );
   return match?.avatar_id || match?.id || null;
 }
