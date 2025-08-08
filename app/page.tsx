@@ -2,91 +2,95 @@
 
 import { useState } from 'react';
 
-type AnyJson = Record<string, any> | null;
+type RespDump = {
+  url: string;
+  ok: boolean;
+  status: number;
+  contentType: string | null;
+  text: string;
+  json?: any;
+  error?: string;
+};
+
+async function fetchDump(url: string, init?: RequestInit): Promise<RespDump> {
+  const res = await fetch(url, init);
+  const contentType = res.headers.get('content-type');
+  const text = await res.text();
+  let json: any = undefined;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    // not JSON — that's fine, we’ll show raw text
+  }
+  return {
+    url,
+    ok: res.ok,
+    status: res.status,
+    contentType,
+    text,
+    json,
+  };
+}
 
 export default function Home() {
-  const [output, setOutput] = useState<AnyJson>(null);
-  const [status, setStatus] = useState<'Idle' | 'Running' | 'Done' | 'Error'>('Idle');
+  const [status, setStatus] = useState<'Idle'|'Running'|'Done'|'Error'>('Idle');
+  const [out, setOut] = useState<any>(null);
 
   async function runChecks() {
     try {
       setStatus('Running');
 
-      // --- GET health checks (verifies the routes exist) ---
-      const retellGetRes = await fetch('/api/retell-token');
-      const retellGET = await retellGetRes.json();
-      const heygenGetRes = await fetch('/api/heygen-session');
-      const heygenGET = await heygenGetRes.json();
+      // GET health checks
+      const getRetell = await fetchDump('/api/retell-token');
+      const getHeygen = await fetchDump('/api/heygen-session');
 
-      // --- POST calls (actual tokens) ---
-      const retellPostRes = await fetch('/api/retell-token', { method: 'POST' });
-      const retellPOST = await retellPostRes.json();
-
-      const heygenPostRes = await fetch('/api/heygen-session', {
+      // POST calls
+      const postRetell = await fetchDump('/api/retell-token', { method: 'POST' });
+      const postHeygen = await fetchDump('/api/heygen-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ avatarId: 'default-avatar-1', voiceId: 'default-voice-1' })
+        body: JSON.stringify({ avatarId:'default-avatar-1', voiceId:'default-voice-1' }),
       });
-      const heygenPOST = await heygenPostRes.json();
 
-      setOutput({ retellGET, heygenGET, retellPOST, heygenPOST });
+      setOut({ getRetell, getHeygen, postRetell, postHeygen });
       setStatus('Done');
-    } catch (e: any) {
+    } catch (e:any) {
       setStatus('Error');
-      setOutput({ error: e?.message || String(e) });
+      setOut({ fatal: String(e?.message || e) });
     }
   }
 
   return (
     <main style={{
-      minHeight: '100vh',
-      display: 'grid',
-      placeItems: 'center',
-      gap: 24,
-      fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif',
-      padding: 24
+      minHeight:'100vh', display:'grid', placeItems:'center', gap:24,
+      fontFamily:'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif',
+      padding:24
     }}>
-      <h1 style={{ margin: 0 }}>Avatar Widget Smoke Test</h1>
+      <h1 style={{margin:0}}>Avatar Widget Diagnostics</h1>
 
       <button
         onClick={runChecks}
-        style={{
-          padding: '12px 20px',
-          cursor: 'pointer',
-          background: '#111827',
-          color: '#fff',
-          border: 'none',
-          borderRadius: 8,
-          fontSize: 16,
-          boxShadow: '0 2px 8px rgba(0,0,0,.15)'
-        }}
-        aria-label="Run API checks"
+        style={{ padding:'12px 20px', cursor:'pointer', background:'#111827', color:'#fff',
+                 border:'none', borderRadius:8, fontSize:16, boxShadow:'0 2px 8px rgba(0,0,0,.15)' }}
       >
         Run API checks
       </button>
 
-      <div style={{ fontSize: 16 }}>Status: <strong>{status}</strong></div>
+      <div>Status: <strong>{status}</strong></div>
 
       <pre style={{
-        textAlign: 'left',
-        width: 'min(900px, 90vw)',
-        whiteSpace: 'pre-wrap',
-        wordBreak: 'break-word',
-        background: '#0b0b0b',
-        color: '#00ff87',
-        padding: 16,
-        borderRadius: 10,
-        boxShadow: 'inset 0 0 0 1px rgba(255,255,255,.08)'
+        textAlign:'left', width:'min(1000px, 92vw)', whiteSpace:'pre-wrap', wordBreak:'break-word',
+        background:'#0b0b0b', color:'#00ff87', padding:16, borderRadius:10,
+        boxShadow:'inset 0 0 0 1px rgba(255,255,255,.08)'
       }}>
-        {output ? JSON.stringify(output, null, 2) : 'No output yet.'}
+        {out ? JSON.stringify(out, null, 2) : 'No output yet.'}
       </pre>
 
-      <p style={{ opacity: 0.7, fontSize: 14, maxWidth: 900, textAlign: 'center' }}>
-        This page verifies your two backend routes. Expected results:
-        <br />• <code>retellGET</code> → <code>{'{ ok: true, route: "retell-token" }'}</code>
-        <br />• <code>heygenGET</code> → <code>{'{ ok: true, route: "heygen-session" }'}</code>
-        <br />• <code>retellPOST</code> → includes <code>access_token</code>
-        <br />• <code>heygenPOST</code> → includes <code>session_token</code> (maybe <code>player_url</code>)
+      <p style={{opacity:.7, fontSize:14, maxWidth:1000}}>
+        • Both GETs should return <code>{"{ ok: true, route: ... }"}</code> as JSON.<br/>
+        • The POST to <code>/api/retell-token</code> should return JSON with <code>access_token</code>.<br/>
+        • The POST to <code>/api/heygen-session</code> should return JSON with <code>session_token</code> (and maybe <code>player_url</code>).<br/>
+        If any call shows HTML, blank text, or non-200 status, we know exactly which route to fix.
       </p>
     </main>
   );
