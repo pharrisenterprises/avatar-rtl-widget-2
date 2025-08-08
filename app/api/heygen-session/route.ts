@@ -1,5 +1,5 @@
 // /app/api/heygen-session/route.ts
-export const runtime = 'nodejs'; // safer for fetch + env
+export const runtime = 'nodejs';
 
 export async function GET() {
   return new Response(JSON.stringify({ ok: true, route: 'heygen-session' }), {
@@ -8,7 +8,14 @@ export async function GET() {
   });
 }
 
-// Creates a new Streaming session (LiveKit) and returns access_token + urls
+type TryResp = {
+  url: string;
+  status: number;
+  ok: boolean;
+  json?: any;
+  text?: string;
+};
+
 export async function POST(request: Request) {
   const apiKey = process.env.HEYGEN_API_KEY;
   if (!apiKey) {
@@ -18,52 +25,58 @@ export async function POST(request: Request) {
     }), { status: 500, headers: { 'Content-Type': 'application/json' }});
   }
 
-  const body = await request.json().catch(() => ({}));
-  const { avatarId, quality, voiceId } = body as {
+  const { avatarId, voiceId, quality } = await request.json().catch(() => ({})) as {
     avatarId?: string;
-    quality?: 'high' | 'medium' | 'low';
     voiceId?: string;
+    quality?: 'high' | 'medium' | 'low';
   };
 
-  try {
-    const r = await fetch('https://api.heygen.com/v1/streaming.new', {
-      method: 'POST',
-      headers: {
-        'X-Api-Key': apiKey,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        quality: quality || 'high',
-        ...(avatarId ? { avatar_id: avatarId } : {}),
-        ...(voiceId ? { voice: { voice_id: voiceId } } : {}),
-        // You can add other fields later (knowledge_base, stt_settings, etc.)
-      }),
-    });
+  const candidates = [
+    'https://api.heygen.com/v1/streaming.new',
+    'https://api.heygen.com/v1/streaming.create_session',
+    'https://api.heygen.com/v1/avatars/streaming.new',
+  ];
 
-    const text = await r.text();
-    let json: any = null;
-    try { json = JSON.parse(text); } catch {}
+  const payload: any = {
+    quality: quality || 'high',
+  };
+  if (avatarId) payload.avatar_id = avatarId;
+  if (voiceId)  payload.voice = { voice_id: voiceId };
 
-    if (!r.ok) {
-      return new Response(JSON.stringify({
-        error: 'heygen_fail',
-        status: r.status,
-        headers: Object.fromEntries(r.headers),
-        detail_text: text,
-        parsed_json: json
-      }), { status: 500, headers: { 'Content-Type': 'application/json' }});
+  const tried: TryResp[] = [];
+
+  for (const url of candidates) {
+    try {
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'X-Api-Key': apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+      const text = await r.text();
+      let json: any = undefined;
+      try { json = JSON.parse(text); } catch {}
+
+      tried.push({ url, status: r.status, ok: r.ok, json, text: r.ok ? undefined : text });
+
+      if (r.ok) {
+        // Success — return the working endpoint + original JSON
+        return new Response(JSON.stringify({
+          ok: true,
+          endpoint_used: url,
+          data: json ?? { raw: text }
+        }), { status: 200, headers: { 'Content-Type': 'application/json' }});
+      }
+    } catch (e: any) {
+      tried.push({ url, status: 0, ok: false, text: String(e?.message || e) });
     }
-
-    // Docs say response includes data.session_id, data.access_token, data.url, etc.
-    // We'll just return whatever JSON HeyGen sent.
-    return new Response(JSON.stringify(json ?? { raw: text }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  } catch (err: any) {
-    return new Response(JSON.stringify({
-      error: 'heygen_exception',
-      detail: String(err?.message || err)
-    }), { status: 500, headers: { 'Content-Type': 'application/json' }});
   }
+
+  // None worked — show everything we tried so we can fix in one go
+  return new Response(JSON.stringify({
+    error: 'heygen_fail_all',
+    tried
+  }), { status: 500, headers: { 'Content-Type': 'application/json' }});
 }
