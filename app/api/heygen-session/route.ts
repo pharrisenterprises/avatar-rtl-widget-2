@@ -1,7 +1,6 @@
 // /app/api/heygen-session/route.ts
-export const runtime = 'edge';
+export const runtime = 'nodejs'; // safer for fetch + env
 
-// Health check (GET)
 export async function GET() {
   return new Response(JSON.stringify({ ok: true, route: 'heygen-session' }), {
     status: 200,
@@ -9,50 +8,62 @@ export async function GET() {
   });
 }
 
-// Create a HeyGen streaming session (POST)
+// Creates a new Streaming session (LiveKit) and returns access_token + urls
 export async function POST(request: Request) {
+  const apiKey = process.env.HEYGEN_API_KEY;
+  if (!apiKey) {
+    return new Response(JSON.stringify({
+      error: 'missing_env',
+      detail: { HEYGEN_API_KEY: false }
+    }), { status: 500, headers: { 'Content-Type': 'application/json' }});
+  }
+
+  const body = await request.json().catch(() => ({}));
+  const { avatarId, quality, voiceId } = body as {
+    avatarId?: string;
+    quality?: 'high' | 'medium' | 'low';
+    voiceId?: string;
+  };
+
   try {
-    const apiKey = process.env.HEYGEN_API_KEY;
-    if (!apiKey) {
-      return new Response(
-        JSON.stringify({ error: 'missing_env', detail: 'HEYGEN_API_KEY not set' }),
-        { status: 500, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-
-    const { avatarId, voiceId } = await request.json().catch(() => ({}));
-
-    const r = await fetch('https://api.heygen.com/v1/streaming.create_session', {
+    const r = await fetch('https://api.heygen.com/v1/streaming.new', {
       method: 'POST',
       headers: {
         'X-Api-Key': apiKey,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        avatar_id: avatarId || 'default-avatar-1',
-        voice_id:  voiceId  || 'default-voice-1',
+        quality: quality || 'high',
+        ...(avatarId ? { avatar_id: avatarId } : {}),
+        ...(voiceId ? { voice: { voice_id: voiceId } } : {}),
+        // You can add other fields later (knowledge_base, stt_settings, etc.)
       }),
     });
 
     const text = await r.text();
-    let data: any = null;
-    try { data = JSON.parse(text); } catch { /* not JSON */ }
+    let json: any = null;
+    try { json = JSON.parse(text); } catch {}
 
     if (!r.ok) {
-      return new Response(
-        JSON.stringify({ error: 'heygen_fail', status: r.status, detail: text }),
-        { status: 500, headers: { 'Content-Type': 'application/json' } }
-      );
+      return new Response(JSON.stringify({
+        error: 'heygen_fail',
+        status: r.status,
+        headers: Object.fromEntries(r.headers),
+        detail_text: text,
+        parsed_json: json
+      }), { status: 500, headers: { 'Content-Type': 'application/json' }});
     }
 
-    return new Response(JSON.stringify(data), {
+    // Docs say response includes data.session_id, data.access_token, data.url, etc.
+    // We'll just return whatever JSON HeyGen sent.
+    return new Response(JSON.stringify(json ?? { raw: text }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
   } catch (err: any) {
-    return new Response(
-      JSON.stringify({ error: 'heygen_exception', detail: String(err?.message || err) }),
-      { status: 500, headers: { 'Content-Type': 'application/json' } }
-    );
+    return new Response(JSON.stringify({
+      error: 'heygen_exception',
+      detail: String(err?.message || err)
+    }), { status: 500, headers: { 'Content-Type': 'application/json' }});
   }
 }
