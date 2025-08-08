@@ -1,88 +1,114 @@
-// /app/api/heygen-session/route.ts
-export const runtime = 'nodejs';
+'use client';
 
-/** GET: sanity check — shows how many avatars your key sees */
-export async function GET() {
-  const apiKey = process.env.HEYGEN_API_KEY || '';
-  const r = await fetch('https://api.heygen.com/v2/avatars', {
-    headers: { 'Accept': 'application/json', 'X-Api-Key': apiKey },
-  });
-  const j = await r.json().catch(() => ({}));
-  const count = Array.isArray(j?.data) ? j.data.length : (Array.isArray(j?.avatars?.avatars) ? j.avatars.avatars.length : 0);
-  return new Response(JSON.stringify({
-    ok: r.ok, status: r.status,
-    endpoint_used: 'https://api.heygen.com/v2/avatars',
-    count
-  }), { status: 200, headers: { 'Content-Type': 'application/json' }});
-}
+import { useState } from 'react';
 
-/** POST: create a Streaming session for an avatar */
-export async function POST(request: Request) {
-  const apiKey = process.env.HEYGEN_API_KEY;
-  if (!apiKey) return jsonErr('Missing HEYGEN_API_KEY', 500);
+type Avatar = { id: string; name: string; thumb?: string | null };
 
-  const body = await request.json().catch(() => ({})) as {
-    avatarId?: string;
-    avatarName?: string;
-    voiceId?: string;
-    quality?: 'high'|'medium'|'low';
-  };
+export default function Home() {
+  const [status, setStatus] = useState<'Idle'|'Running'|'Done'|'Error'>('Idle');
+  const [avatars, setAvatars] = useState<Avatar[]>([]);
+  const [query, setQuery] = useState('');
+  const [avatarId, setAvatarId] = useState('');
+  const [log, setLog] = useState<any>({});
 
-  // Resolve avatar id: explicit → env → (optionally by name)
-  let avatarId = body.avatarId || process.env.HEYGEN_AVATAR_ID || '';
-  const avatarName = (body.avatarName || '').trim();
-
-  if (!avatarId && avatarName) {
-    avatarId = await findAvatarIdByName(apiKey, avatarName) || '';
-  }
-  if (!avatarId) return jsonErr('Missing avatar_id. Provide avatarId or set HEYGEN_AVATAR_ID.', 400);
-
-  const payload: any = { avatar_id: avatarId, quality: body.quality || 'high' };
-  const voiceId = body.voiceId || process.env.HEYGEN_VOICE_ID;
-  if (voiceId) payload.voice = { voice_id: voiceId };
-
-  const url = 'https://api.heygen.com/v2/streaming.new';
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-
-  const text = await r.text();
-  let json: any = undefined; try { json = JSON.parse(text); } catch {}
-
-  if (!r.ok) {
-    return new Response(JSON.stringify({
-      error: 'heygen_fail',
-      status: r.status,
-      endpoint_used: url,
-      request_payload: payload,
-      detail_text: text,
-      parsed_json: json,
-    }), { status: 500, headers: { 'Content-Type': 'application/json' }});
+  async function loadAvatars() {
+    setStatus('Running');
+    const r = await fetch(`/api/heygen-avatars?q=${encodeURIComponent(query)}&limit=32`);
+    const j = await r.json();
+    if (!r.ok || !j?.ok) {
+      setStatus('Error');
+      setLog((l:any) => ({ ...l, avatarsError: j }));
+      return;
+    }
+    setAvatars(j.avatars || []);
+    if (!avatarId && j.avatars?.length) setAvatarId(j.avatars[0].id);
+    setStatus('Idle');
   }
 
-  // Success — return whatever HeyGen returns (usually data.{ session_id, access_token, url/realtime_endpoint, player_url? })
-  return new Response(JSON.stringify({ ok: true, endpoint_used: url, data: json?.data ?? json }), {
-    status: 200, headers: { 'Content-Type': 'application/json' }
-  });
-}
+  async function runChecks() {
+    setStatus('Running');
+    try {
+      const getRetell = await brief('/api/retell-token');
+      const getHeygen = await brief('/api/heygen-session');
 
-function jsonErr(msg: string, status = 400) {
-  return new Response(JSON.stringify({ error: msg }), { status, headers: { 'Content-Type': 'application/json' }});
-}
+      const postRetell = await brief('/api/retell-token', { method: 'POST' });
 
-async function findAvatarIdByName(apiKey: string, name: string): Promise<string | null> {
-  const r = await fetch('https://api.heygen.com/v2/avatars', {
-    headers: { 'Accept': 'application/json', 'X-Api-Key': apiKey },
-  });
-  const j = await r.json().catch(() => ({}));
-  const list: any[] =
-    (Array.isArray(j?.data) && j.data) ||
-    (Array.isArray(j?.avatars?.avatars) && j.avatars.avatars) ||
-    [];
-  const match = list.find(a =>
-    (a?.avatar_name || a?.name || a?.display_name || '').toLowerCase() === name.toLowerCase()
+      const postHeygen = await brief('/api/heygen-session', {
+        method: 'POST',
+        headers: { 'Content-Type':'application/json' },
+        body: JSON.stringify(avatarId ? { avatarId } : {}) // if not set, server uses env default
+      });
+
+      setLog({ usedAvatarId: avatarId || '(env default)', getRetell, getHeygen, postRetell, postHeygen });
+      setStatus('Done');
+    } catch (e:any) {
+      setStatus('Error');
+      setLog({ fatal: String(e?.message || e) });
+    }
+  }
+
+  return (
+    <main style={{minHeight:'100vh',display:'grid',placeItems:'center',gap:16,padding:24,fontFamily:'system-ui'}}>
+      <h1>Avatar Widget • Setup Check</h1>
+
+      <section style={{display:'grid',gap:10, width:'min(960px,95vw)'}}>
+        <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+          <input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search avatars (e.g., Ilia)" style={input}/>
+          <button onClick={loadAvatars} style={btn}>Load avatars</button>
+        </div>
+
+        {!!avatars.length && (
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(220px,1fr))',gap:10, maxHeight:320, overflow:'auto'}}>
+            {avatars.map(a => (
+              <div key={a.id} style={{border:'1px solid #ddd',borderRadius:8,padding:10,display:'grid',gap:8}}>
+                {a.thumb ? <img src={a.thumb} alt={a.name} style={{width:'100%',borderRadius:6}}/> : null}
+                <div style={{fontWeight:600}}>{a.name}</div>
+                <code style={{fontSize:12,opacity:.8}}>{a.id}</code>
+                <button onClick={()=>setAvatarId(a.id)}
+                        style={{...btn, background: avatarId===a.id ? '#111827' : '#e5e7eb', color: avatarId===a.id ? '#fff' : '#111'}}>
+                  {avatarId===a.id ? 'Selected' : 'Use this'}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={{opacity:.7,fontSize:14}}>
+          Current avatarId: <code>{avatarId || '(env default)'}</code>
+        </div>
+      </section>
+
+      <button onClick={runChecks} style={btn}>Run API checks</button>
+      <div>Status: <strong>{status}</strong></div>
+
+      <pre style={pre}>{JSON.stringify(log, null, 2)}</pre>
+
+      <p style={{opacity:.7,fontSize:14,maxWidth:900,textAlign:'center'}}>
+        Success = Retell POST returns <code>access_token</code> & HeyGen POST returns session info (token + URL or player_url).
+      </p>
+    </main>
   );
-  return match?.avatar_id || match?.id || null;
+}
+
+const btn: React.CSSProperties = { padding:'10px 16px', cursor:'pointer', background:'#111827', color:'#fff', border:'none', borderRadius:8 };
+const input: React.CSSProperties = { padding:'8px 10px', border:'1px solid #ccc', borderRadius:6, minWidth:260 };
+const pre: React.CSSProperties = { textAlign:'left', width:'min(980px,95vw)', whiteSpace:'pre-wrap', wordBreak:'break-word', background:'#0b0b0b', color:'#00ff87', padding:16, borderRadius:10 };
+
+async function brief(url: string, init?: RequestInit) {
+  const res = await fetch(url, init);
+  const ct = res.headers.get('content-type') || '';
+  const text = await res.text();
+  let json: any = undefined; try { json = JSON.parse(text); } catch {}
+  // redact tokens if present
+  if (json?.access_token) json.access_token = '***';
+  if (json?.data?.access_token) json.data.access_token = '***';
+  return { ok: res.ok, status: res.status, contentType: ct, endpoint: url, json: summarize(json) };
+}
+
+function summarize(j: any) {
+  if (!j) return j;
+  const copy = JSON.parse(JSON.stringify(j));
+  if (Array.isArray(copy?.avatars)) copy.avatars = `[${copy.avatars.length} items]`;
+  if (Array.isArray(copy?.data)) copy.data = `[${copy.data.length} items]`;
+  return copy;
 }
