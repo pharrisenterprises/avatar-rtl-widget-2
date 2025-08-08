@@ -1,28 +1,55 @@
+// /app/api/retell-token/route.ts
 export const runtime = 'edge';
 
+// Health check (GET)
 export async function GET() {
-  return Response.json({ ok: true, route: 'retell-token' });
+  return new Response(JSON.stringify({ ok: true, route: 'retell-token' }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
 }
 
+// Create a Retell web-call token (POST)
 export async function POST() {
   try {
     const apiKey = process.env.RETELL_API_KEY;
-    if (!apiKey) {
-      return new Response(JSON.stringify({ error: 'Missing RETELL_API_KEY' }), { status: 500 });
+    const agentId = process.env.RETELL_AGENT_ID;
+
+    if (!apiKey || !agentId) {
+      return new Response(
+        JSON.stringify({ error: 'missing_env', detail: 'RETELL_API_KEY or RETELL_AGENT_ID not set' }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } }
+      );
     }
 
-    const res = await fetch('https://api.retellai.com/v2/some-endpoint', {
+    const r = await fetch('https://api.retell.ai/v2/create-web-call', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ /* whatever payload Retell expects */ }),
+      body: JSON.stringify({ agent_id: agentId }),
     });
 
-    const data = await res.json();
-    return Response.json(data);
-  } catch (err:any) {
-    return new Response(JSON.stringify({ error: err.message }), { status: 500 });
+    const text = await r.text();
+    let data: any = null;
+    try { data = JSON.parse(text); } catch { /* not JSON */ }
+
+    if (!r.ok) {
+      return new Response(
+        JSON.stringify({ error: 'retell_fail', status: r.status, detail: text }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    return new Response(JSON.stringify(data), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  } catch (err: any) {
+    return new Response(
+      JSON.stringify({ error: 'retell_exception', detail: String(err?.message || err) }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
+    );
   }
 }
