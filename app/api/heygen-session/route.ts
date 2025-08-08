@@ -1,82 +1,51 @@
-// /app/api/heygen-session/route.ts
+// /app/api/heygen-avatars/route.ts
 export const runtime = 'nodejs';
 
+// Use the v2 list endpoint per your docs
+const URL = 'https://api.heygen.com/v2/avatars';
+
 export async function GET() {
-  return new Response(JSON.stringify({ ok: true, route: 'heygen-session' }), {
-    status: 200,
-    headers: { 'Content-Type': 'application/json' },
-  });
-}
-
-type TryResp = {
-  url: string;
-  status: number;
-  ok: boolean;
-  json?: any;
-  text?: string;
-};
-
-export async function POST(request: Request) {
   const apiKey = process.env.HEYGEN_API_KEY;
   if (!apiKey) {
-    return new Response(JSON.stringify({
-      error: 'missing_env',
-      detail: { HEYGEN_API_KEY: false }
-    }), { status: 500, headers: { 'Content-Type': 'application/json' }});
+    return new Response(JSON.stringify({ error: 'missing_env', HEYGEN_API_KEY: false }), { status: 500 });
   }
 
-  const { avatarId, voiceId, quality } = await request.json().catch(() => ({})) as {
-    avatarId?: string;
-    voiceId?: string;
-    quality?: 'high' | 'medium' | 'low';
-  };
+  try {
+    const r = await fetch(URL, {
+      headers: {
+        'Accept': 'application/json',
+        'X-Api-Key': apiKey,
+      },
+    });
 
-  const candidates = [
-    'https://api.heygen.com/v1/streaming.new',
-    'https://api.heygen.com/v1/streaming.create_session',
-    'https://api.heygen.com/v1/avatars/streaming.new',
-  ];
+    const text = await r.text();
+    let json: any = undefined;
+    try { json = JSON.parse(text); } catch {}
 
-  const payload: any = {
-    quality: quality || 'high',
-  };
-  if (avatarId) payload.avatar_id = avatarId;
-  if (voiceId)  payload.voice = { voice_id: voiceId };
-
-  const tried: TryResp[] = [];
-
-  for (const url of candidates) {
-    try {
-      const r = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'X-Api-Key': apiKey,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload),
-      });
-      const text = await r.text();
-      let json: any = undefined;
-      try { json = JSON.parse(text); } catch {}
-
-      tried.push({ url, status: r.status, ok: r.ok, json, text: r.ok ? undefined : text });
-
-      if (r.ok) {
-        // Success — return the working endpoint + original JSON
-        return new Response(JSON.stringify({
-          ok: true,
-          endpoint_used: url,
-          data: json ?? { raw: text }
-        }), { status: 200, headers: { 'Content-Type': 'application/json' }});
-      }
-    } catch (e: any) {
-      tried.push({ url, status: 0, ok: false, text: String(e?.message || e) });
+    if (!r.ok || !json) {
+      return new Response(JSON.stringify({
+        error: 'list_avatars_failed',
+        status: r.status,
+        detail_text: text,
+      }), { status: 500, headers: { 'Content-Type': 'application/json' }});
     }
-  }
 
-  // None worked — show everything we tried so we can fix in one go
-  return new Response(JSON.stringify({
-    error: 'heygen_fail_all',
-    tried
-  }), { status: 500, headers: { 'Content-Type': 'application/json' }});
+    // Normalize to { avatars: [ { id, name } ] }
+    const avatars = Array.isArray(json?.data) ? json.data : [];
+    const mapped = avatars.map((a: any) => ({
+      id: a?.avatar_id || a?.id,
+      name: a?.name || a?.display_name || 'Unnamed',
+      raw: a
+    })).filter((v: any) => v.id);
+
+    return new Response(JSON.stringify({
+      ok: true,
+      endpoint_used: URL,
+      count: mapped.length,
+      avatars: mapped
+    }), { status: 200, headers: { 'Content-Type': 'application/json' }});
+
+  } catch (e: any) {
+    return new Response(JSON.stringify({ error: 'exception', detail: String(e?.message || e) }), { status: 500 });
+  }
 }
