@@ -1,16 +1,11 @@
 import { NextResponse } from 'next/server';
 
-/**
- * GET: simple sanity check
- */
+/** Simple sanity check with GET */
 export async function GET() {
   return NextResponse.json({ ok: true, route: '/api/heygen-token' });
 }
 
-/**
- * POST: create a short-lived Streaming Avatar session token
- * HeyGen docs: POST https://api.heygen.com/v1/streaming.create_token
- */
+/** Create short-lived HeyGen Streaming Avatar token */
 export async function POST() {
   const apiKey = process.env.HEYGEN_API_KEY;
   if (!apiKey) {
@@ -21,8 +16,8 @@ export async function POST() {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
+      'Content-Type': 'application/json'
+    }
   });
 
   const data = await r.json().catch(() => ({} as any));
