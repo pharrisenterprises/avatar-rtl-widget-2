@@ -89,36 +89,4 @@ export default function AvatarBridgeV4() {
 
       a.on(StreamingEvents.STREAM_READY, (evt: any) => {
         const stream: MediaStream = evt.detail;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.play().catch(() => {});
-        }
-      });
-
-      const voiceId = process.env.NEXT_PUBLIC_HEYGEN_VOICE_ID || '';
-      const avatarName = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_NAME || '';
-
-      await a.createStartAvatar({
-        quality: AvatarQuality.High,
-        ...(voiceId ? { voice: { voiceId } } : {}),
-        ...(avatarName ? { avatarName } : {}),
-      });
-
-      setAvatar(a);
-      setStatus('ready');
-      setMsg('Live! Speak to Retell; avatar mirrors agent replies. (v4)');
-
-      // Immediate hello
-      speakQueueRef.current.push('Hello, I am ready to assist you.');
-      void drainSpeakQueue(a);
-    } catch (e: any) {
-      console.error(e);
-      setStatus('error');
-      setMsg(`Error (v4): ${e?.message || e}`);
-    }
-  }
-
-  return (
-    <main style={{ padding: 24, maxWidth: 980, margin: '0 auto', fontFamily: 'system-ui' }}>
-      <h1>Retell ↔ HeyGen Avatar Bridge — v4 (/avatar)</h1>
-      <p>Status: <b>{status}</b></p
+        if (vide
