@@ -102,20 +102,4 @@ export default function Home() {
         ref={videoRef}
         autoPlay
         playsInline
-        muted
-        style={{
-          width: '100%',
-          maxWidth: 860,
-          aspectRatio: '16/9',
-          background: '#000',
-          borderRadius: 12,
-          marginTop: 16
-        }}
-      />
-      <div style={{ marginTop: 24 }}>
-        <a href="/avatar">Go to /avatar version</a>
-      </div>
-    </main>
-  );
-}
 
