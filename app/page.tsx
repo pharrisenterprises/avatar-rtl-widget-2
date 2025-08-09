@@ -1,77 +1,66 @@
 'use client';
-
-import { useEffect, useRef, useState } from 'react';
-import { StreamingAvatar, TaskType } from '@heygen/streaming-avatar';
+import { useState } from 'react';
 
 export default function Home() {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const [active, setActive] = useState(false);
-  const avatarRef = useRef<StreamingAvatar | null>(null);
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [status, setStatus] = useState<'idle' | 'loading' | 'ok' | 'error'>('idle');
+  const [msg, setMsg] = useState<string>('Click Start to test the avatar.');
+  const [playerUrl, setPlayerUrl] = useState<string | null>(null);
 
   async function start() {
-    if (active) return;
-    setActive(true);
+    try {
+      setStatus('loading');
+      setMsg('Requesting HeyGen session…');
+      setPlayerUrl(null);
 
-    // 1) Get a one-time streaming token from our server
-    const tokResp = await fetch('/api/heygen-token', { method: 'POST' });
-    const tokJson = await tokResp.json();
-    const token = tokJson?.data?.token;
-    if (!token) {
-      alert('Could not get HeyGen token');
-      setActive(false);
-      return;
-    }
+      const r = await fetch('/api/heygen-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
 
-    // 2) Create the Streaming Avatar client
-    const avatar = new StreamingAvatar({ token });
-    avatarRef.current = avatar;
+      if (!r.ok) {
+        const text = await r.text();
+        setStatus('error');
+        setMsg(`API error ${r.status}: ${text.slice(0,200)}`);
+        return;
+      }
 
-    // 3) Hook the video track to our <video>
-    avatar.on('videoTrack', (track: MediaStreamTrack) => {
-      if (!videoRef.current) return;
-      const ms = new MediaStream([track]);
-      videoRef.current.srcObject = ms;
-      videoRef.current.play().catch(() => {});
-    });
+      const data = await r.json();
 
-    // 4) Start a fresh session (SDK wraps the streaming.new + start bits)
-    const session = await avatar.createStartAvatar({
-      // quality: 'high', // optional; defaults OK. See docs.
-      // You can pass an avatar id/voice later; for now use defaults so we just connect.
-    });
-    setSessionId(session.session_id);
-
-    // 5) Say one test line so you can verify audio/video
-    await avatar.speak({
-      sessionId: session.session_id,
-      text: "Hi! Your HeyGen avatar is connected.",
-      task_type: TaskType.REPEAT
-    });
-  }
-
-  async function stop() {
-    setActive(false);
-    try { await avatarRef.current?.stopAvatar({ sessionId: sessionId! }); } catch {}
-    try { await avatarRef.current?.disconnect(); } catch {}
-    avatarRef.current = null;
-    setSessionId(null);
-
-    // Clear the video element
-    if (videoRef.current) {
-      const src = videoRef.current.srcObject as MediaStream | null;
-      src?.getTracks().forEach(t => t.stop());
-      videoRef.current.srcObject = null;
+      if (data.player_url) {
+        setPlayerUrl(data.player_url);
+        setStatus('ok');
+        setMsg('Connected! Your avatar should be visible below.');
+      } else {
+        setStatus('ok');
+        setMsg(`Got JSON without player_url. Keys: ${Object.keys(data).join(', ')}`);
+        console.log('Session response:', data);
+      }
+    } catch (e:any) {
+      setStatus('error');
+      setMsg(`Unexpected error: ${e?.message || e}`);
     }
   }
 
   return (
-    <main style={{minHeight:'100vh',display:'grid',placeItems:'center',gap:16,fontFamily:'system-ui'}}>
-      <video ref={videoRef} autoPlay playsInline muted={false}
-             style={{width:360,height:640,borderRadius:16,background:'#000'}} />
-      <div style={{display:'flex',gap:12}}>
-        <button onClick={start} disabled={active} style={{padding:'10px 16px'}}>Start</button>
-        <button onClick={stop} disabled={!active} style={{padding:'10px 16px'}}>Stop</button>
+    <main style={{ padding: 24, maxWidth: 820, margin: '0 auto', fontFamily: 'system-ui' }}>
+      <h1>Avatar Start Test</h1>
+      <p>Status: <b>{status}</b></p>
+      <button onClick={start} style={{ padding: '10px 16px', borderRadius: 8, cursor: 'pointer' }}>
+        Start
+      </button>
+      <p style={{ marginTop: 12 }}>{msg}</p>
+
+      {playerUrl && (
+        <iframe
+          title="HeyGen Player"
+          src={playerUrl}
+          style={{ width: '100%', height: 520, border: 0, marginTop: 16, borderRadius: 12 }}
+          allow="microphone; camera; autoplay; clipboard-read; clipboard-write; encrypted-media;"
+        />
+      )}
+
+      <div style={{ marginTop: 24 }}>
+        <a href="/diagnostics">Go to diagnostics</a>
       </div>
     </main>
   );
