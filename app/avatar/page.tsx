@@ -38,16 +38,16 @@ export default function AvatarBridge() {
       setStatus('starting');
       setMsg('Requesting tokens...');
 
-      // Get Retell web-call access token
+      // Retell web-call access token
       const retellRes = await fetch('/api/retell-webcall', { method: 'POST' });
       if (!retellRes.ok) throw new Error('Retell token failed: ' + retellRes.status);
       const { access_token } = await retellRes.json();
 
-      // Start Retell call (no event wiring yet, just to keep this page minimal & build-safe)
+      // Start Retell call
       const retell = new RetellWebClient();
       await retell.startCall({ accessToken: access_token });
 
-      // Get HeyGen session token
+      // HeyGen session token
       const heygenRes = await fetch('/api/heygen-token', { method: 'POST' });
       if (!heygenRes.ok) throw new Error('HeyGen token failed: ' + heygenRes.status);
       const { token } = await heygenRes.json();
@@ -62,42 +62,6 @@ export default function AvatarBridge() {
         }
       });
 
+      // Build options object in a TS-friendly way
       const voiceId = process.env.NEXT_PUBLIC_HEYGEN_VOICE_ID || '';
-      const avatarName = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_NAME || '';
-
-      await a.createStartAvatar({
-        quality: AvatarQuality.High,
-        ...(voiceId ? { voice: { voiceId } } : {}),
-        ...(avatarName ? { avatarName } : {}),
-      });
-
-      setAvatar(a);
-      setStatus('ready');
-      setMsg('Live! Press Start again if you need to restart.');
-      speakQueueRef.current.push('Hello, I am ready to assist you.');
-      void drainSpeakQueue(a);
-    } catch (e: any) {
-      console.error(e);
-      setStatus('error');
-      setMsg('Error: ' + (e?.message || String(e)));
-    }
-  }
-
-  return (
-    <main style={{ padding: 24, maxWidth: 980, margin: '0 auto', fontFamily: 'system-ui' }}>
-      <h1>Retell x HeyGen Avatar Bridge - /avatar</h1>
-      <p>Status: <strong>{status}</strong></p>
-      <button onClick={start} style={{ padding: '10px 16px', borderRadius: 8, cursor: 'pointer' }}>
-        Start
-      </button>
-      <p style={{ marginTop: 12 }}>{msg}</p>
-      <video
-        ref={videoRef}
-        autoPlay
-        playsInline
-        muted
-        style={{ width: '100%', maxWidth: 860, aspectRatio: '16/9', background: '#000', borderRadius: 12, marginTop: 16 }}
-      />
-    </main>
-  );
-}
+      const avatarName = process.env.NEXT_PUBLIC_H
