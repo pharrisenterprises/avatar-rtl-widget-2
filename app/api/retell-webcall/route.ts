@@ -1,34 +1,25 @@
 import { NextResponse } from 'next/server';
 
-/**
- * GET: sanity check
- */
+/** Simple sanity check with GET */
 export async function GET() {
   return NextResponse.json({ ok: true, route: '/api/retell-webcall' });
 }
 
-/**
- * POST: Creates a Retell Web Call and returns an access_token for the browser.
- * Docs: POST /v2/create-web-call  (retell)
- */
+/** Create a Retell Web Call and return access_token */
 export async function POST() {
   const apiKey = process.env.RETELL_API_KEY;
   const agentId = process.env.RETELL_AGENT_ID;
 
-  if (!apiKey) {
-    return NextResponse.json({ error: 'Missing RETELL_API_KEY' }, { status: 500 });
-  }
-  if (!agentId) {
-    return NextResponse.json({ error: 'Missing RETELL_AGENT_ID' }, { status: 500 });
-  }
+  if (!apiKey) return NextResponse.json({ error: 'Missing RETELL_API_KEY' }, { status: 500 });
+  if (!agentId) return NextResponse.json({ error: 'Missing RETELL_AGENT_ID' }, { status: 500 });
 
   const r = await fetch('https://api.retellai.com/v2/create-web-call', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
+      'Content-Type': 'application/json'
     },
-    body: JSON.stringify({ agent_id: agentId }),
+    body: JSON.stringify({ agent_id: agentId })
   });
 
   const data = await r.json().catch(() => ({} as any));
