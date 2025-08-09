@@ -13,17 +13,13 @@ export default function Home() {
       setStatus('loading');
       setMsg('Requesting HeyGen session token…');
 
-      // 1) ask our backend for a short-lived token
       const res = await fetch('/api/heygen-token', { method: 'POST' });
       if (!res.ok) throw new Error(`Token API ${res.status}`);
       const { token } = await res.json();
 
       setMsg('Starting avatar session…');
-
-      // 2) create the avatar client with the token
       const a = new StreamingAvatar({ token });
 
-      // When the stream is ready, attach it to the <video>
       a.on(StreamingEvents.STREAM_READY, (evt: any) => {
         const stream: MediaStream = evt.detail;
         if (videoRef.current) {
@@ -32,19 +28,14 @@ export default function Home() {
         }
       });
 
-      // 3) create+start a session (defaults are fine for testing)
       await a.createStartAvatar({
-        quality: AvatarQuality.High,        // 720p
-        // avatarName: 'default',           // optional; uses default avatar
-        // voice: { voiceId: '...' },       // optional; you can set later if you want
-        // language: 'en',                   // optional
+        quality: AvatarQuality.High,
       });
 
       setAvatar(a);
       setStatus('ok');
       setMsg('Connected! I’m about to say a test line…');
 
-      // 4) say a test line
       await a.speak({ text: 'Hello! Your streaming avatar is working.', task_type: TaskType.REPEAT });
 
     } catch (e: any) {
@@ -62,7 +53,6 @@ export default function Home() {
         Start
       </button>
       <p style={{ marginTop: 12 }}>{msg}</p>
-
       <video
         ref={videoRef}
         autoPlay
@@ -70,11 +60,9 @@ export default function Home() {
         muted
         style={{ width: '100%', maxWidth: 720, aspectRatio: '16/9', background: '#000', borderRadius: 12, marginTop: 16 }}
       />
-
       <div style={{ marginTop: 24 }}>
         <a href="/diagnostics">Go to diagnostics</a>
       </div>
     </main>
   );
 }
-
