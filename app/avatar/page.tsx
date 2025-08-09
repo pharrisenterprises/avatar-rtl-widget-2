@@ -50,7 +50,7 @@ export default function AvatarBridgeV4() {
   async function start() {
     try {
       setStatus('starting');
-      setMsg('Creating Retell web call… (v4)');
+      setMsg('Creating Retell web call... (v4)');
 
       // Retell access token
       const retellRes = await fetch('/api/retell-webcall', { method: 'POST' });
@@ -77,7 +77,7 @@ export default function AvatarBridgeV4() {
         }
       });
 
-      setMsg('Starting HeyGen avatar session… (v4)');
+      setMsg('Starting HeyGen avatar session... (v4)');
 
       // HeyGen token
       const tokenRes = await fetch('/api/heygen-token', { method: 'POST' });
@@ -85,8 +85,4 @@ export default function AvatarBridgeV4() {
       const { token } = await tokenRes.json();
 
       // Init HeyGen
-      const a = new StreamingAvatar({ token });
-
-      a.on(StreamingEvents.STREAM_READY, (evt: any) => {
-        const stream: MediaStream = evt.detail;
-        if (vide
+      const a =
