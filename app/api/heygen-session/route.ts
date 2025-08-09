@@ -1,18 +1,25 @@
-// GET: quick sanity — only return a count, never the whole list
-export async function GET() {
-  const apiKey = process.env.HEYGEN_API_KEY || '';
-  const r = await fetch('https://api.heygen.com/v2/avatars', {
-    headers: { 'Accept': 'application/json', 'X-Api-Key': apiKey },
-  });
-  const j = await r.json().catch(() => ({}));
-  const count =
-    (Array.isArray(j?.data) && j.data.length) ||
-    (Array.isArray(j?.avatars?.avatars) && j.avatars.avatars.length) || 0;
+import { NextResponse } from 'next/server';
 
-  return new Response(JSON.stringify({
-    ok: r.ok,
-    status: r.status,
-    endpoint_used: 'https://api.heygen.com/v2/avatars',
-    count
-  }), { status: 200, headers: { 'Content-Type': 'application/json' }});
+// Simple GET so /diagnostics can ping this route
+export async function GET() {
+  return NextResponse.json({ ok: true, route: '/api/heygen-session' });
+}
+
+// POST is what your Start button is calling
+export async function POST() {
+  // TODO: replace this stub with a real HeyGen session call.
+  // For now we return a fake shape so your UI moves forward.
+  // If you ALREADY have a HeyGen player URL you want to embed,
+  // you can temporarily paste it below to prove the page works.
+  const useTemporaryPlayerUrl = ''; // e.g. 'https://player.heygen.com/...?token=...'
+
+  if (useTemporaryPlayerUrl) {
+    return NextResponse.json({ player_url: useTemporaryPlayerUrl });
+  }
+
+  // No player_url yet—return keys so the UI shows "Got JSON without player_url"
+  return NextResponse.json({
+    ok: true,
+    note: 'Stub response – add HeyGen API call here',
+  });
 }
