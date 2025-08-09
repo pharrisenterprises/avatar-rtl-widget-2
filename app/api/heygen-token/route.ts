@@ -16,7 +16,6 @@ export async function POST() {
       'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
-    // No body required for this token call per docs
   });
 
   const data = await r.json().catch(() => ({}));
@@ -24,11 +23,10 @@ export async function POST() {
     return NextResponse.json({ error: 'heygen_token_failed', detail: data }, { status: r.status });
   }
 
-  // Docs return { data: { token: "..." } }
   const token = data?.data?.token;
   if (!token) {
     return NextResponse.json({ error: 'no_token_in_response', detail: data }, { status: 500 });
   }
-
   return NextResponse.json({ token });
 }
+
