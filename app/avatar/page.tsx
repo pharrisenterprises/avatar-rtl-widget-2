@@ -64,4 +64,42 @@ export default function AvatarBridge() {
 
       // Build options object in a TS-friendly way
       const voiceId = process.env.NEXT_PUBLIC_HEYGEN_VOICE_ID || '';
-      const avatarName = process.env.NEXT_PUBLIC_H
+      const avatarName = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_NAME || '';
+      const opts: any = { quality: AvatarQuality.High };
+      if (voiceId) opts.voice = { voiceId };
+      if (avatarName) opts.avatarName = avatarName;
+
+      await a.createStartAvatar(opts);
+
+      setAvatar(a);
+      setStatus('ready');
+      setMsg('Live! Press Start again if you need to restart.');
+
+      // Say a quick hello so you see/hear it
+      speakQueueRef.current.push('Hello, I am ready to assist you.');
+      void drainSpeakQueue(a);
+    } catch (e: any) {
+      console.error(e);
+      setStatus('error');
+      setMsg('Error: ' + (e?.message || String(e)));
+    }
+  }
+
+  return (
+    <main style={{ padding: 24, maxWidth: 980, margin: '0 auto', fontFamily: 'system-ui' }}>
+      <h1>Retell x HeyGen Avatar Bridge - /avatar</h1>
+      <p>Status: <strong>{status}</strong></p>
+      <button onClick={start} style={{ padding: '10px 16px', borderRadius: 8, cursor: 'pointer' }}>
+        Start
+      </button>
+      <p style={{ marginTop: 12 }}>{msg}</p>
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        style={{ width: '100%', maxWidth: 860, aspectRatio: '16/9', background: '#000', borderRadius: 12, marginTop: 16 }}
+      />
+    </main>
+  );
+}
