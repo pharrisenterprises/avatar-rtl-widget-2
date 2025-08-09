@@ -1,9 +1,8 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
-import RetellWebClient from 'retell-client-js-sdk';
-import {
-  StreamingAvatar,
+import { useRef, useState } from 'react';
+import { RetellWebClient } from 'retell-client-js-sdk';
+import StreamingAvatar, {
   StreamingEvents,
   TaskType,
   AvatarQuality,
@@ -122,50 +121,4 @@ export default function AvatarBridgeV4() {
   return (
     <main style={{ padding: 24, maxWidth: 980, margin: '0 auto', fontFamily: 'system-ui' }}>
       <h1>Retell ↔ HeyGen Avatar Bridge — v4 (/avatar)</h1>
-      <p>Status: <b>{status}</b></p>
-
-      <button onClick={start} style={{ padding: '10px 16px', borderRadius: 8, cursor: 'pointer' }}>
-        Start
-      </button>
-
-      <p style={{ marginTop: 12 }}>{msg}</p>
-
-      <video
-        ref={videoRef}
-        autoPlay
-        playsInline
-        muted
-        style={{
-          width: '100%',
-          maxWidth: 860,
-          aspectRatio: '16/9',
-          background: '#000',
-          borderRadius: 12,
-          marginTop: 16
-        }}
-      />
-
-      <div
-        style={{
-          marginTop: 12,
-          padding: '12px 14px',
-          borderRadius: 10,
-          background: '#111',
-          color: '#fff',
-          lineHeight: 1.5,
-          fontSize: 16,
-          maxWidth: 860
-        }}
-      >
-        <div style={{ opacity: 0.7, fontSize: 12, marginBottom: 6 }}>Agent captions</div>
-        {captions.length === 0 ? (
-          <div style={{ opacity: 0.6 }}>…waiting for agent</div>
-        ) : (
-          captions.map((c, i) => (
-            <div key={i} style={{ margin: '4px 0' }}>• {c}</div>
-          ))
-        )}
-      </div>
-    </main>
-  );
-}
+      <p>Status: <b>{status}</b></p
