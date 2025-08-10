@@ -19,20 +19,24 @@ export default function AvatarBridge() {
 
   // Debug telemetry
   const [silenceRetell, setSilenceRetell] = useState<boolean>(true);
+  const [brutalMute, setBrutalMute] = useState<boolean>(true);
   const [updatesSeen, setUpdatesSeen] = useState<number>(0);
   const [candidatesCount, setCandidatesCount] = useState<number>(0);
   const [sampleText, setSampleText] = useState<string>('—');
+  const [lastAction, setLastAction] = useState<string>('—');
 
-  // Rolling agent text this turn + how much we’ve already spoken
-  const agentFullRef = useRef<string>('');
-  const spokenIdxRef = useRef<number>(0);
+  // Rolling agent text + bookkeeping
+  const agentFullRef = useRef<string>('');     // latest full agent string we’ve seen
+  const lastFullRef = useRef<string>('');      // previous full
+  const spokenIdxRef = useRef<number>(0);      // chars of agentFullRef that we've already spoken
   const idleTimerRef = useRef<number | null>(null);
 
   // Speak queue (no overlap)
   const speakQueueRef = useRef<string[]>([]);
   const speakingRef = useRef<boolean>(false);
 
-  // ========== Helpers: mute non-avatar media (safe version) ==========
+  // ========== Mute helpers ==========
+  // Soft mute: keep non-our <audio>/<video> muted
   useEffect(() => {
     const tick = () => {
       if (!silenceRetell) return;
@@ -40,7 +44,6 @@ export default function AvatarBridge() {
       document.querySelectorAll('audio, video').forEach((el) => {
         const m = el as HTMLMediaElement;
         if (ours && m === ours) {
-          // keep HeyGen audible
           m.muted = false;
           m.volume = 1;
           return;
@@ -52,6 +55,24 @@ export default function AvatarBridge() {
     return () => window.clearInterval(interval);
   }, [silenceRetell]);
 
+  // Brutal mute: remove any non-our media nodes
+  useEffect(() => {
+    if (!brutalMute) return;
+    const kill = () => {
+      const ours = videoRef.current;
+      document.querySelectorAll('audio, video').forEach((el) => {
+        if (ours && el === ours) return;
+        // remove sneaky media nodes
+        (el as HTMLMediaElement).pause?.();
+        el.parentElement?.removeChild(el);
+      });
+    };
+    const mo = new MutationObserver(kill);
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+    const interval = window.setInterval(kill, 300);
+    return () => { mo.disconnect(); window.clearInterval(interval); };
+  }, [brutalMute]);
+
   // ========== HeyGen speak helpers ==========
   async function safeSpeak(a: StreamingAvatar, text: string) {
     const t = (text || '').trim();
@@ -59,6 +80,7 @@ export default function AvatarBridge() {
     try {
       await a.speak({ text: t, task_type: TaskType.REPEAT } as any);
       setCaptions((prev) => [...prev.slice(-10), t]);
+      setLastAction(`spoke: "${t.slice(0, 60)}${t.length > 60 ? '…' : ''}"`);
     } catch (err) {
       console.error('[HeyGen] speak failed:', err);
       setMsg('Error: speak() failed. See console.');
@@ -86,7 +108,7 @@ export default function AvatarBridge() {
     if (avatar) void drainSpeakQueue(avatar);
   }
 
-  // ========== Retell text extraction (robust but simple) ==========
+  // ========== Retell text extraction ==========
   function isUserRole(o: any): boolean {
     const role = (o?.role || o?.speaker || o?.source || o?.who || '').toString().toLowerCase();
     return role.includes('user');
@@ -95,7 +117,7 @@ export default function AvatarBridge() {
   function collectCandidates(u: any): string[] {
     const out: string[] = [];
 
-    // 1) Rolling transcript array
+    // 1) Rolling transcript array (most reliable)
     if (Array.isArray(u?.transcript)) {
       const arr = u.transcript as any[];
       for (const item of arr) {
@@ -121,7 +143,7 @@ export default function AvatarBridge() {
 
   function normalizeFull(candidates: string[]): string {
     if (!candidates.length) return '';
-    // Take the longest; fallback to joined
+    // Take the longest (usually contains the whole turn); fallback to joined
     const longest = candidates.reduce((a, b) => (a.length >= b.length ? a : b), '');
     const joined = candidates.join(' ');
     return (longest.length > joined.length ? longest : joined).replace(/\s+/g, ' ').trim();
@@ -159,6 +181,10 @@ export default function AvatarBridge() {
     }
   }
 
+  // Smarter update handler:
+  // - Update rolling full text.
+  // - If a *new sentence* appeared since last time, speak it immediately.
+  // - If no punctuation, flush remainder after 900ms idle.
   function handleRetellUpdate(u: any) {
     setUpdatesSeen((n) => n + 1);
 
@@ -169,12 +195,28 @@ export default function AvatarBridge() {
     const full = normalizeFull(candidates);
     if (!full) return;
 
+    const prevFull = agentFullRef.current;
     agentFullRef.current = full;
 
-    if (idleTimerRef.current) window.clearTimeout(idleTimerRef.current);
-    idleTimerRef.current = window.setTimeout(() => tryFlushTail(true), 1200);
+    // If the full text grew and contains a newly finished sentence, speak it
+    const last = spokenIdxRef.current;
+    if (full.length > prevFull.length) {
+      const { completed, consumed } = splitCompletedSince(last, full);
+      if (completed.length > 0) {
+        spokenIdxRef.current = last + consumed;
+        completed.forEach((s) => enqueueToSpeak(s));
+        setLastAction(`auto: ${completed.length} sentence(s)`);
+      }
+    }
 
-    tryFlushTail(false);
+    // Idle flush after short pause (covers turns that end w/o punctuation)
+    if (idleTimerRef.current) window.clearTimeout(idleTimerRef.current);
+    idleTimerRef.current = window.setTimeout(() => {
+      tryFlushTail(true);
+      setLastAction('idle flush');
+    }, 900);
+
+    lastFullRef.current = full;
   }
 
   // ========== Start flow ==========
@@ -193,10 +235,9 @@ export default function AvatarBridge() {
       console.log('[Retell] call started');
 
       retell.on?.('update', (u: any) => {
-        // console.log('[Retell] update', u);
         try { handleRetellUpdate(u); } catch (e) { console.error('parse update failed', e); }
       });
-      retell.on?.('agent_stop_talking', () => tryFlushTail(true));
+      retell.on?.('agent_stop_talking', () => { tryFlushTail(true); setLastAction('stop flush'); });
       retell.on?.('error', (e: any) => console.error('[Retell] error', e));
 
       // HeyGen
@@ -233,7 +274,7 @@ export default function AvatarBridge() {
     }
   }
 
-  // Manual sanity: speak arbitrary text via HeyGen
+  // Manual: speak arbitrary text via HeyGen
   async function speakManual(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (!avatar) return;
@@ -242,6 +283,12 @@ export default function AvatarBridge() {
     enqueueToSpeak(t);
     await drainSpeakQueue(avatar);
     (e.currentTarget.querySelector('input[name="say"]') as HTMLInputElement).value = '';
+  }
+
+  // Force flush leftover unsent tail (debug button)
+  function forceFlush() {
+    tryFlushTail(true);
+    setLastAction('manual force flush');
   }
 
   return (
@@ -257,9 +304,16 @@ export default function AvatarBridge() {
           <input name="say" placeholder="Type a line for Graham to say" style={{ padding: 8, borderRadius: 6, width: 360 }} />
           <button type="submit" style={{ padding: '8px 12px', borderRadius: 8, cursor: 'pointer' }}>Speak</button>
         </form>
+        <button onClick={forceFlush} style={{ padding: '8px 12px', borderRadius: 8, cursor: 'pointer' }}>
+          Force flush
+        </button>
         <label style={{ display: 'flex', gap: 6, alignItems: 'center', marginLeft: 10 }}>
           <input type="checkbox" checked={silenceRetell} onChange={(e) => setSilenceRetell(e.target.checked)} />
           Silence Retell audio
+        </label>
+        <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <input type="checkbox" checked={brutalMute} onChange={(e) => setBrutalMute(e.target.checked)} />
+          Brutal mute (remove other media)
         </label>
       </div>
 
@@ -301,6 +355,8 @@ export default function AvatarBridge() {
         <div><b>Updates seen:</b> {updatesSeen}</div>
         <div><b>Candidate strings:</b> {candidatesCount}</div>
         <div><b>Sample:</b> <span style={{ color: '#fff' }}>{sampleText}</span></div>
+        <div><b>Last action:</b> {lastAction}</div>
+        <div><b>Full len / Spoken idx:</b> {agentFullRef.current.length} / {spokenIdxRef.current}</div>
       </div>
     </main>
   );
