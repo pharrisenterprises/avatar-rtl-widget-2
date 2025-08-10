@@ -25,6 +25,7 @@ export default function EmbedAvatar() {
   const [interim, setInterim] = useState<string>('');
   const [finalText, setFinalText] = useState<string>('');
   const [micAvailable, setMicAvailable] = useState<boolean>(false);
+  const [muted, setMuted] = useState<boolean>(false); // NEW: mute avatar audio
 
   const avatarRef = useRef<any>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -33,7 +34,7 @@ export default function EmbedAvatar() {
   const speakQueueRef = useRef<string[]>([]);
   const speakingRef = useRef<boolean>(false);
 
-  // minimal, compact styles for embed
+  // compact shell for bottom-right widget
   const shell: React.CSSProperties = {
     width: 360,
     height: 560,
@@ -44,12 +45,19 @@ export default function EmbedAvatar() {
     fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif',
   };
 
-  // Speech support check
   useEffect(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (SR) { setMicAvailable(true); setMicStatus('idle'); }
     else { setMicAvailable(false); setMicStatus('unsupported'); }
   }, []);
+
+  useEffect(() => {
+    // keep video element audio in sync with "muted" state
+    if (videoRef.current) {
+      videoRef.current.muted = muted;
+      videoRef.current.volume = muted ? 0 : 1;
+    }
+  }, [muted]);
 
   function enqueueToSpeak(text: string) {
     const t = (text || '').trim();
@@ -76,7 +84,7 @@ export default function EmbedAvatar() {
     try {
       setStatus('starting');
 
-      // Start Retell Chat (no audio)
+      // Start Retell Chat (no audio from Retell)
       const r1 = await fetch('/api/retell-chat/start', { method: 'POST' });
       if (!r1.ok) throw new Error('Chat start failed');
       const { chat_id } = await r1.json();
@@ -92,8 +100,8 @@ export default function EmbedAvatar() {
         const stream: MediaStream = evt.detail;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
-          videoRef.current.muted = false;
-          videoRef.current.volume = 1;
+          videoRef.current.muted = muted;        // respect current mute state
+          videoRef.current.volume = muted ? 0 : 1;
           videoRef.current.play().catch(() => {});
         }
       });
@@ -126,7 +134,7 @@ export default function EmbedAvatar() {
     if (agentText) { enqueueToSpeak(agentText); await drainSpeakQueue(); }
   }
 
-  // Web Speech (mic)
+  // Web Speech (mic) is optional — users can always just type
   function initRecognition() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) return null;
@@ -209,17 +217,39 @@ export default function EmbedAvatar() {
 
       {/* Controls */}
       <div style={{ display: 'grid', gap: 8, marginTop: 10 }}>
-        <button
-          onClick={startAll}
-          disabled={status === 'starting' || status === 'ready'}
-          style={{ padding: '10px 12px', borderRadius: 8, cursor: 'pointer' }}
-        >
-          {status === 'ready' ? 'Ready' : 'Start'}
-        </button>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            onClick={startAll}
+            disabled={status === 'starting' || status === 'ready'}
+            style={{ padding: '10px 12px', borderRadius: 8, cursor: 'pointer' }}
+          >
+            {status === 'ready' ? 'Ready' : 'Start'}
+          </button>
 
+          <button
+            onClick={() => setMuted((m) => !m)}
+            disabled={status !== 'ready'}
+            style={{ padding: '10px 12px', borderRadius: 8, cursor: status==='ready' ? 'pointer' : 'not-allowed' }}
+            title="Mute/unmute avatar audio (captions still show)"
+          >
+            {muted ? 'Unmute' : 'Mute'}
+          </button>
+
+          <button
+            onClick={micStatus === 'listening' ? () => stopMic(true) : startMic}
+            disabled={!micAvailable || status !== 'ready'}
+            style={{ padding: '10px 12px', borderRadius: 8, cursor: (micAvailable && status==='ready') ? 'pointer' : 'not-allowed' }}
+            title={micAvailable ? '' : 'Use Chrome/Edge for mic speech'}
+          >
+            {micStatus === 'unsupported' ? 'Mic not supported' :
+             micStatus === 'listening' ? 'Stop Mic' : 'Start Mic'}
+          </button>
+        </div>
+
+        {/* Text chat (works even if mic is never used) */}
         <div style={{ display: 'flex', gap: 6 }}>
           <input
-            placeholder="Type a message"
+            placeholder="Type a message (mic optional)"
             onKeyDown={async (e) => {
               if (e.key === 'Enter') {
                 const target = e.target as HTMLInputElement;
@@ -240,18 +270,6 @@ export default function EmbedAvatar() {
             style={{ padding: '8px 12px', borderRadius: 8, cursor: 'pointer' }}
           >
             Send
-          </button>
-        </div>
-
-        <div style={{ display: 'flex', gap: 6 }}>
-          <button
-            onClick={micStatus === 'listening' ? () => stopMic(true) : startMic}
-            disabled={!micAvailable || status !== 'ready'}
-            style={{ padding: '8px 12px', borderRadius: 8, cursor: (micAvailable && status==='ready') ? 'pointer' : 'not-allowed' }}
-            title={micAvailable ? '' : 'Use Chrome/Edge for mic speech'}
-          >
-            {micStatus === 'unsupported' ? 'Mic not supported' :
-             micStatus === 'listening' ? 'Stop Mic' : 'Start Mic'}
           </button>
         </div>
       </div>
