@@ -1,20 +1,23 @@
-/** @type {import('next').NextConfig} */
-const nextConfig = {
+// next.config.ts
+import type { NextConfig } from 'next';
+
+const nextConfig: NextConfig = {
   async headers() {
     return [
       {
         source: '/:path*',
         headers: [
           {
+            // Allow your widget to be embedded on WordPress (staging + WP.com),
+            // your future domain, and GoDaddy if you still test there.
             key: 'Content-Security-Policy',
             value:
-              "frame-ancestors 'self' https://*.godaddysites.com https://*.godaddy.com https://avatar-rtl-widget-2.vercel.app;"
+              "frame-ancestors 'self' https://*.wpcomstaging.com https://*.wordpress.com https://pharrisenterprises-qjmtx.wpcomstaging.com https://infinitysales.ai https://*.godaddysites.com https://*.godaddy.com;"
           }
-          // If you have other security headers, make sure they don't conflict
         ]
       }
     ];
   }
 };
 
-module.exports = nextConfig;
+export default nextConfig;
