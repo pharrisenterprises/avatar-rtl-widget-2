@@ -1,23 +1,28 @@
-// next.config.ts
-import type { NextConfig } from 'next';
+import type { NextConfig } from 'next'
 
 const nextConfig: NextConfig = {
+  reactStrictMode: true,
   async headers() {
     return [
       {
-        source: '/:path*',
+        source: '/(.*)',
         headers: [
           {
-            // Allow your widget to be embedded on WordPress (staging + WP.com),
-            // your future domain, and GoDaddy if you still test there.
-            key: 'Content-Security-Policy',
-            value:
-              "frame-ancestors 'self' https://*.wpcomstaging.com https://*.wordpress.com https://pharrisenterprises-qjmtx.wpcomstaging.com https://infinitysales.ai https://*.godaddysites.com https://*.godaddy.com;"
-          }
-        ]
-      }
-    ];
-  }
-};
+            key: 'Access-Control-Allow-Origin',
+            value: 'https://pharrisenterprises-qjmtx.wpcomstaging.com',
+          },
+          {
+            key: 'Access-Control-Allow-Methods',
+            value: 'GET, POST, OPTIONS',
+          },
+          {
+            key: 'Access-Control-Allow-Headers',
+            value: 'X-Requested-With, Content-Type, Authorization',
+          },
+        ],
+      },
+    ]
+  },
+}
 
-export default nextConfig;
+export default nextConfig
