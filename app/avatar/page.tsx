@@ -9,16 +9,6 @@ import StreamingAvatar, {
 } from '@heygen/streaming-avatar';
 
 type Status = 'idle' | 'starting' | 'ready' | 'error';
-type TranscriptItem = {
-  role?: string;
-  speaker?: string;
-  source?: string;
-  who?: string;
-  text?: string;
-  transcript?: string;
-  content?: string;
-  message?: string;
-};
 
 export default function AvatarBridge() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -28,36 +18,63 @@ export default function AvatarBridge() {
   const [captions, setCaptions] = useState<string[]>([]);
   const [debug, setDebug] = useState<string>('—');
 
-  // rolling agent text for current turn + how much we have spoken
+  // Rolling full agent text this turn + how much we've already spoken
   const agentFullRef = useRef<string>('');
   const spokenIdxRef = useRef<number>(0);
   const idleTimerRef = useRef<number | null>(null);
 
-  // speak queue so lines do not overlap
+  // Queue to avoid overlap
   const speakQueueRef = useRef<string[]>([]);
   const speakingRef = useRef<boolean>(false);
 
-  // -------- Mute everything except our HeyGen <video> --------
-  function hardMuteNonAvatarMedia() {
-    const av = videoRef.current;
-    const medias = document.querySelectorAll('audio, video');
-    medias.forEach((el) => {
-      const m = el as HTMLMediaElement;
-      if (av && m === av) {
-        m.muted = false;
-        m.volume = 1;
-      } else {
-        try { m.muted = true; m.volume = 0; } catch {}
-      }
-    });
-  }
+  // ---- HARD SILENCE for anything that isn't our HeyGen video ----
   useEffect(() => {
-    const mo = new MutationObserver(() => hardMuteNonAvatarMedia());
+    // Mark our video so we allow it to play with audio
+    if (videoRef.current) {
+      (videoRef.current as any).dataset.allowPlay = '1';
+    }
+
+    // Monkey-patch HTMLMediaElement.play so unexpected elements are forced muted
+    const origPlay = (HTMLMediaElement.prototype as any).play;
+    const patchedPlay = function (this: HTMLMediaElement, ...args: any[]) {
+      const allow = (this as any).dataset && (this as any).dataset.allowPlay === '1';
+      if (!allow) {
+        try { this.muted = true; this.volume = 0; } catch {}
+      }
+      try {
+        const p = origPlay.apply(this, args);
+        // Swallow autoplay errors for silenced elements
+        if (p && typeof p.catch === 'function') return p.catch(() => undefined);
+        return p;
+      } catch {
+        return Promise.resolve();
+      }
+    };
+    (HTMLMediaElement.prototype as any).play = patchedPlay;
+
+    // Keep smashing volume down on any new <audio>/<video> except our own
+    const smash = () => {
+      const ours = videoRef.current;
+      document.querySelectorAll('audio, video').forEach((el) => {
+        const m = el as HTMLMediaElement;
+        const allow = (m as any).dataset && (m as any).dataset.allowPlay === '1';
+        if (!allow || (ours && m !== ours)) {
+          try { m.muted = true; m.volume = 0; m.pause?.(); } catch {}
+        }
+      });
+    };
+    const mo = new MutationObserver(smash);
     mo.observe(document.documentElement, { childList: true, subtree: true });
-    return () => mo.disconnect();
+    const interval = window.setInterval(smash, 500);
+
+    return () => {
+      (HTMLMediaElement.prototype as any).play = origPlay;
+      mo.disconnect();
+      window.clearInterval(interval);
+    };
   }, []);
 
-  // -------- HeyGen speak helpers --------
+  // ---- HeyGen speak helpers ----
   async function safeSpeak(a: StreamingAvatar, text: string) {
     const t = text.trim();
     if (!t) return;
@@ -89,67 +106,68 @@ export default function AvatarBridge() {
     if (avatar) void drainSpeakQueue(avatar);
   }
 
-  // -------- Retell transcript handling (sentence-based) --------
-  function isUserRole(x: any): boolean {
-    const role = (x?.role || x?.speaker || x?.source || x?.who || '').toString().toLowerCase();
+  // ---- Retell text extraction (deep + robust) ----
+  function isUserRole(o: any): boolean {
+    const role = (o?.role || o?.speaker || o?.source || o?.who || '').toString().toLowerCase();
     return role.includes('user');
   }
-  function extractLooseText(x: any): string | null {
-    const t = x?.text ?? x?.transcript ?? x?.content ?? x?.message ?? null;
-    return typeof t === 'string' && t.trim() ? t.trim() : null;
+
+  // Recursively collect candidate strings from keys we care about
+  function deepCollectAgentStrings(o: any, seen: Set<any>, path: string[] = [], acc: string[] = []): string[] {
+    if (!o || typeof o !== 'object' || seen.has(o)) return acc;
+    seen.add(o);
+
+    // If this object itself declares a user role, skip its subtree
+    if (isUserRole(o)) return acc;
+
+    const keys = Object.keys(o);
+    for (const k of keys) {
+      const v: any = (o as any)[k];
+      const newPath = [...path, k];
+
+      // If key looks texty
+      if (typeof v === 'string' && /text|transcript|content|message/i.test(k)) {
+        const s = v.trim();
+        if (s) acc.push(s);
+      }
+
+      // transcript arrays
+      if (Array.isArray(v) && /transcript/i.test(k)) {
+        for (const item of v) {
+          if (item && typeof item === 'object' && !isUserRole(item)) {
+            const x = (item.text || item.transcript || item.content || item.message || '').toString().trim();
+            if (x) acc.push(x);
+          }
+        }
+      }
+
+      // Recurse objects and arrays
+      if (v && typeof v === 'object') {
+        deepCollectAgentStrings(v, seen, newPath, acc);
+      }
+    }
+    return acc;
   }
 
-  function extractAgentFromUpdate(update: any): string | null {
-    const seen: string[] = [];
-
-    if (Array.isArray(update?.transcript)) {
-      seen.push('transcript[]');
-      const arr = update.transcript as TranscriptItem[];
-      const agentLines = arr.filter((it) => !isUserRole(it)).map(extractLooseText).filter(Boolean) as string[];
-      if (agentLines.length) {
-        setDebug(seen.join(' -> '));
-        return agentLines.join(' ').replace(/\s+/g, ' ').trim();
-      }
-    }
-    const arContent = update?.agent_response?.content;
-    if (typeof arContent === 'string' && arContent.trim()) {
-      seen.push('agent_response.content');
-      setDebug(seen.join(' -> '));
-      return arContent.trim();
-    }
-    const amText = extractLooseText(update?.agent_message);
-    if (amText) {
-      seen.push('agent_message');
-      setDebug(seen.join(' -> '));
-      return amText;
-    }
-    const msgObj = update?.message;
-    if (msgObj && (msgObj.role === 'assistant' || msgObj.role === 'agent')) {
-      const mText = extractLooseText(msgObj);
-      if (mText) {
-        seen.push('message(role=assistant/agent)');
-        setDebug(seen.join(' -> '));
-        return mText;
-      }
-    }
-    const loose = extractLooseText(update);
-    if (loose) {
-      seen.push('top-level(text)');
-      setDebug(seen.join(' -> '));
-      return loose;
-    }
-    setDebug('no-agent-text');
-    return null;
+  // From a big blob of agent strings, build a single normalized "full" text
+  function normalizeAgentFull(candidates: string[]): string {
+    if (candidates.length === 0) return '';
+    // take the longest candidate (usually the whole turn), fallback to join
+    const longest = candidates.reduce((a, b) => (a.length >= b.length ? a : b), '');
+    const joined = candidates.join(' ');
+    const full = (longest.length > joined.length ? longest : joined).replace(/\s+/g, ' ').trim();
+    return full;
   }
 
   function splitCompletedSince(lastIdx: number, full: string) {
     const newChunk = full.slice(lastIdx);
     if (!newChunk) return { completed: [] as string[], consumed: 0 };
-    const regex = /[^.!?…]+[.!?…]+["')]*\s*/g;
+    // sentence enders . ! ? … with optional closing quotes/paren + trailing spaces
+    const re = /[^.!?…]+[.!?…]+["')]*\s*/g;
     const completed: string[] = [];
     let consumed = 0;
     let m: RegExpExecArray | null;
-    while ((m = regex.exec(newChunk)) !== null) {
+    while ((m = re.exec(newChunk)) !== null) {
       completed.push(m[0].trim());
       consumed = m.index + m[0].length;
     }
@@ -162,7 +180,7 @@ export default function AvatarBridge() {
     if (full.length <= last) return;
 
     const { completed, consumed } = splitCompletedSince(last, full);
-    if (completed.length > 0) {
+    if (completed.length) {
       spokenIdxRef.current = last + consumed;
       completed.forEach((s) => enqueueToSpeak(s));
     }
@@ -175,154 +193,4 @@ export default function AvatarBridge() {
     }
   }
 
-  function handleAnyUpdate(update: any) {
-    const agentFull = extractAgentFromUpdate(update);
-    if (!agentFull) return;
-    const full = agentFull.replace(/\s+/g, ' ').trim();
-    if (!full) return;
-
-    agentFullRef.current = full;
-
-    if (idleTimerRef.current) window.clearTimeout(idleTimerRef.current);
-    idleTimerRef.current = window.setTimeout(() => {
-      tryFlushTail(true);
-    }, 1200);
-
-    tryFlushTail(false);
-  }
-
-  // -------- Start flow --------
-  async function start() {
-    try {
-      setStatus('starting');
-      setMsg('Requesting tokens...');
-
-      const retellRes = await fetch('/api/retell-webcall', { method: 'POST' });
-      if (!retellRes.ok) throw new Error('Retell token failed: ' + retellRes.status);
-      const { access_token } = await retellRes.json();
-
-      const retell = new RetellWebClient();
-      await retell.startCall({ accessToken: access_token });
-      hardMuteNonAvatarMedia();
-
-      retell.on?.('update', (u: any) => {
-        try { handleAnyUpdate(u); } catch (e) { console.error('[Bridge] parse update failed', e); }
-      });
-      retell.on?.('agent_start_talking', () => {});
-      retell.on?.('agent_stop_talking', () => { tryFlushTail(true); });
-      retell.on?.('error', (e: any) => console.error('[Retell] error', e));
-
-      const heygenRes = await fetch('/api/heygen-token', { method: 'POST' });
-      if (!heygenRes.ok) throw new Error('HeyGen token failed: ' + heygenRes.status);
-      const { token } = await heygenRes.json();
-
-      const a = new StreamingAvatar({ token });
-      a.on(StreamingEvents.STREAM_READY, (evt: any) => {
-        const stream: MediaStream = evt.detail;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.muted = false;
-          videoRef.current.play().catch(() => {});
-        }
-        hardMuteNonAvatarMedia();
-      });
-
-      const voiceId = process.env.NEXT_PUBLIC_HEYGEN_VOICE_ID || '';
-      const avatarName = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_NAME || '';
-      const opts: any = { quality: AvatarQuality.High };
-      if (voiceId) opts.voice = { voiceId };
-      if (avatarName) opts.avatarName = avatarName;
-
-      await a.createStartAvatar(opts);
-      setAvatar(a);
-      setStatus('ready');
-      setMsg('Live! Avatar mirrors the agent (sentences only).');
-    } catch (e: any) {
-      console.error(e);
-      setStatus('error');
-      setMsg('Error: ' + (e?.message || String(e)));
-    }
-  }
-
-  async function sayTest() {
-    if (!avatar) return;
-    enqueueToSpeak('Manual test line. You should hear me and see my mouth move.');
-    await drainSpeakQueue(avatar);
-  }
-
-  return (
-    <main style={{ padding: 24, maxWidth: 980, margin: '0 auto', fontFamily: 'system-ui' }}>
-      <h1>Retell x HeyGen Avatar Bridge - /avatar</h1>
-      <p>Status: <strong>{status}</strong></p>
-
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <button
-          onClick={start}
-          style={{ padding: '10px 16px', borderRadius: 8, cursor: 'pointer' }}
-        >
-          Start
-        </button>
-        <button
-          onClick={sayTest}
-          style={{ padding: '10px 16px', borderRadius: 8, cursor: 'pointer' }}
-        >
-          Say test line
-        </button>
-      </div>
-
-      <p style={{ marginTop: 12 }}>{msg}</p>
-
-      <video
-        ref={videoRef}
-        autoPlay
-        playsInline
-        style={{
-          width: '100%',
-          maxWidth: 860,
-          aspectRatio: '16/9',
-          background: '#000',
-          borderRadius: 12,
-          marginTop: 16
-        }}
-      />
-
-      <div
-        style={{
-          marginTop: 12,
-          padding: '12px 14px',
-          borderRadius: 10,
-          background: '#111',
-          color: '#fff',
-          lineHeight: 1.5,
-          fontSize: 16,
-          maxWidth: 860
-        }}
-      >
-        <div style={{ opacity: 0.7, fontSize: 12, marginBottom: 6 }}>Agent captions</div>
-        {captions.length === 0 ? (
-          <div style={{ opacity: 0.6 }}>…waiting for agent</div>
-        ) : (
-          captions.map((c, i) => (
-            <div key={i} style={{ margin: '4px 0' }}>• {c}</div>
-          ))
-        )}
-      </div>
-
-      <div
-        style={{
-          position: 'fixed',
-          right: 8,
-          bottom: 8,
-          background: '#111',
-          color: '#9ae6b4',
-          padding: '6px 8px',
-          borderRadius: 8,
-          fontSize: 12,
-          opacity: 0.9
-        }}
-      >
-        src: {debug}
-      </div>
-    </main>
-  );
-}
+  function handleRetell
