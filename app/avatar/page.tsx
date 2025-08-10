@@ -17,12 +17,13 @@ export default function AvatarBridge() {
   const [msg, setMsg] = useState('Click Start to begin Retell + Avatar.');
   const [avatar, setAvatar] = useState<StreamingAvatar | null>(null);
   const [captions, setCaptions] = useState<string[]>([]);
+  const [debug, setDebug] = useState<string>('—');
 
-  // Rolling full text of the current agent turn.
+  // Rolling full agent text for current turn
   const agentFullRef = useRef<string>('');
-  // Char index in agentFullRef we've already spoken up to.
+  // Char index already spoken
   const spokenIdxRef = useRef<number>(0);
-  // Debounce timer to flush tail when no punctuation.
+  // Debounce flush timer
   const idleTimerRef = useRef<number | null>(null);
 
   // Speak queue to avoid overlaps
@@ -55,7 +56,6 @@ export default function AvatarBridge() {
     const t = text.trim();
     if (!t) return;
     try {
-      console.log('[HeyGen] speak ->', t);
       await a.speak({ text: t, task_type: TaskType.REPEAT } as any);
       setCaptions(prev => [...prev.slice(-10), t]);
     } catch (err) {
@@ -87,41 +87,75 @@ export default function AvatarBridge() {
     const role = (x?.role || x?.speaker || x?.source || x?.who || '').toString().toLowerCase();
     return role.includes('user');
   }
-  function extractText(x: any): string | null {
+  function extractLooseText(x: any): string | null {
     const t = x?.text ?? x?.transcript ?? x?.content ?? x?.message ?? null;
     return typeof t === 'string' && t.trim() ? t.trim() : null;
   }
-  function handleTranscriptUpdate(update: any) {
-    const arr = Array.isArray(update?.transcript) ? (update.transcript as TranscriptItem[]) : [];
-    if (!arr.length) return;
 
-    // Build the latest AGENT-only full string from this rolling window
-    const agentLines = arr
-      .filter(item => !isUserRole(item))
-      .map(item => extractText(item))
-      .filter((t): t is string => !!t);
+  // Robust agent text extractor for many Retell shapes
+  function extractAgentFromUpdate(update: any): string | null {
+    const seen: string[] = [];
 
-    const full = agentLines.join(' ').replace(/\s+/g, ' ').trim();
-    if (!full) return;
+    // 1) transcript array (rolling)
+    if (Array.isArray(update?.transcript)) {
+      seen.push('transcript[]');
+      const arr = update.transcript as TranscriptItem[];
+      // build only agent lines
+      const agentLines = arr
+        .filter(item => !isUserRole(item))
+        .map(extractLooseText)
+        .filter((t): t is string => !!t);
+      if (agentLines.length) {
+        setDebug(seen.join(' → '));
+        return agentLines.join(' ').replace(/\s+/g, ' ').trim();
+      }
+    }
 
-    agentFullRef.current = full;
+    // 2) agent_response.content
+    const arContent = update?.agent_response?.content;
+    if (typeof arContent === 'string' && arContent.trim()) {
+      seen.push('agent_response.content');
+      setDebug(seen.join(' → '));
+      return arContent.trim();
+    }
 
-    // Debounce flush: if no new updates in 1200ms, we’ll flush leftover tail
-    if (idleTimerRef.current) window.clearTimeout(idleTimerRef.current);
-    idleTimerRef.current = window.setTimeout(() => {
-      tryFlushTail(true);
-    }, 1200);
+    // 3) agent_message.text/content
+    const am = update?.agent_message;
+    const amText = extractLooseText(am);
+    if (amText) {
+      seen.push('agent_message');
+      setDebug(seen.join(' → '));
+      return amText;
+    }
 
-    // Try to flush any newly completed sentences now
-    tryFlushTail(false);
+    // 4) message with role assistant
+    const msgObj = update?.message;
+    if (msgObj && (msgObj.role === 'assistant' || msgObj.role === 'agent')) {
+      const mText = extractLooseText(msgObj);
+      if (mText) {
+        seen.push('message(role=assistant/agent)');
+        setDebug(seen.join(' → '));
+        return mText;
+      }
+    }
+
+    // 5) top-level text-like fields
+    const loose = extractLooseText(update);
+    if (loose) {
+      seen.push('top-level(text)');
+      setDebug(seen.join(' → '));
+      return loose;
+    }
+
+    // nothing found
+    setDebug('no-agent-text');
+    return null;
   }
 
-  // Split into sentences that end with punctuation; leave a tail if not ended
   function splitCompletedSince(lastIdx: number, full: string) {
     const newChunk = full.slice(lastIdx);
     if (!newChunk) return { completed: [] as string[], consumed: 0 };
-
-    // Find sentences ending in . ! ? … (with optional quotes)
+    // sentence ends: . ! ? … with optional closing quotes/paren
     const regex = /[^.!?…]+[.!?…]+["')]*\s*/g;
     const completed: string[] = [];
     let consumed = 0;
@@ -140,14 +174,10 @@ export default function AvatarBridge() {
     if (full.length <= last) return;
 
     const { completed, consumed } = splitCompletedSince(last, full);
-
-    // Speak any newly completed sentences
     if (completed.length > 0) {
       spokenIdxRef.current = last + consumed;
       completed.forEach(s => enqueueToSpeak(s));
     }
-
-    // If forcing (idle pause) and there is leftover tail without punctuation, speak it once
     if (forceFinal && spokenIdxRef.current < full.length) {
       const tail = full.slice(spokenIdxRef.current).trim();
       if (tail) {
@@ -155,6 +185,27 @@ export default function AvatarBridge() {
         enqueueToSpeak(tail);
       }
     }
+  }
+
+  function handleAnyUpdate(update: any) {
+    const agentFull = extractAgentFromUpdate(update);
+    if (!agentFull) return;
+
+    // Normalize whitespace
+    const full = agentFull.replace(/\s+/g, ' ').trim();
+    if (!full) return;
+
+    // Track the full rolling string for this turn
+    agentFullRef.current = full;
+
+    // Debounce flush if agent pauses
+    if (idleTimerRef.current) window.clearTimeout(idleTimerRef.current);
+    idleTimerRef.current = window.setTimeout(() => {
+      tryFlushTail(true);
+    }, 1200);
+
+    // Try to flush any newly completed sentences immediately
+    tryFlushTail(false);
   }
 
   // ---------- Start flow ----------
@@ -172,17 +223,16 @@ export default function AvatarBridge() {
       await retell.startCall({ accessToken: access_token });
       console.log('[Retell] call started');
 
-      hardMuteNonAvatarMedia(); // immediately mute any Retell audio elements
+      hardMuteNonAvatarMedia(); // immediately silence Retell output
 
-      // Listen for live rolling transcript
+      // Listen for any update shape
       retell.on?.('update', (u: any) => {
         // console.log('[Retell] update', u);
-        try { handleTranscriptUpdate(u); } catch (e) { console.error('[Bridge] parse update failed', e); }
+        try { handleAnyUpdate(u); } catch (e) { console.error('[Bridge] parse update failed', e); }
       });
-      retell.on?.('agent_start_talking', (e: any) => console.log('[Retell] agent_start_talking'));
-      retell.on?.('agent_stop_talking', (e: any) => {
+      retell.on?.('agent_start_talking', () => console.log('[Retell] agent_start_talking'));
+      retell.on?.('agent_stop_talking', () => {
         console.log('[Retell] agent_stop_talking');
-        // On stop, immediately flush any leftover tail
         tryFlushTail(true);
       });
       retell.on?.('error', (e: any) => console.error('[Retell] error', e));
@@ -201,27 +251,24 @@ export default function AvatarBridge() {
           videoRef.current.muted = false; // we want HeyGen audio
           videoRef.current.play().catch(() => {});
         }
-        console.log('[HeyGen] stream ready');
         hardMuteNonAvatarMedia(); // keep Retell muted even if new tags appear
       });
 
-      const voiceId = process.env.NEXT_PUBLIC_HEYGEN_VOICE_ID || '';
-      const avatarName = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_NAME || ''; // e.g. Graham_Chair_Sitting_public
+      const voiceId = process.env.NEXT_PUBLIC_HEYGEN_VOICE_ID || '';      // Shawn AU
+      const avatarName = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_NAME || ''; // Graham_Chair_Sitting_public
 
       const opts: any = { quality: AvatarQuality.High };
       if (voiceId) opts.voice = { voiceId };
       if (avatarName) opts.avatarName = avatarName;
 
       await a.createStartAvatar(opts);
-      console.log('[HeyGen] avatar session started', opts);
 
       setAvatar(a);
       setStatus('ready');
-      setMsg('Live! Avatar mirrors the agent. (Sentences only, no repeats)');
+      setMsg('Live! Avatar mirrors the agent (sentences only).');
 
-      // Say a short hello so you confirm audio/lips
-      enqueueToSpeak('Link is live. I will now mirror the agent without repeating.');
-      void drainSpeakQueue(a);
+      // DO NOT auto-speak any greeting here.
+      // We’ll only speak agent lines pushed by the bridge.
     } catch (e: any) {
       console.error(e);
       setStatus('error');
@@ -229,11 +276,11 @@ export default function AvatarBridge() {
     }
   }
 
-  // Manual sanity button optional (kept for testing)
+  // Manual test (still useful)
   async function sayTest() {
     if (!avatar) return;
-    enqueueToSpeak('Manual test line. You should both hear me and see my mouth move.');
-    await drainSpeakQueue(avatar);
+    enqueueToSpeak('Manual test line. You should hear me and see my mouth move.');
+    await drainSpeakQueue(avatar!);
   }
 
   return (
@@ -241,32 +288,4 @@ export default function AvatarBridge() {
       <h1>Retell x HeyGen Avatar Bridge - /avatar</h1>
       <p>Status: <strong>{status}</strong></p>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <button onClick={start} style={{ padding: '10px 16px', borderRadius: 8, cursor: 'pointer' }}>Start</button>
-        <button onClick={sayTest} style={{ padding: '10px 16px', borderRadius: 8, cursor: 'pointer' }}>Say test line</button>
-      </div>
-      <p style={{ marginTop: 12 }}>{msg}</p>
-
-      <video
-        ref={videoRef}
-        autoPlay
-        playsInline
-        style={{ width: '100%', maxWidth: 860, aspectRatio: '16/9', background: '#000', borderRadius: 12, marginTop: 16 }}
-      />
-
-      {/* Captions (exact chunks sent to HeyGen) */}
-      <div
-        style={{
-          marginTop: 12, padding: '12px 14px', borderRadius: 10,
-          background: '#111', color: '#fff', lineHeight: 1.5, fontSize: 16, maxWidth: 860
-        }}
-      >
-        <div style={{ opacity: 0.7, fontSize: 12, marginBottom: 6 }}>Agent captions</div>
-        {captions.length === 0 ? (
-          <div style={{ opacity: 0.6 }}>…waiting for agent</div>
-        ) : (
-          captions.map((c, i) => (<div key={i} style={{ margin: '4px 0' }}>• {c}</div>))
-        )}
-      </div>
-    </main>
-  );
-}
+        <button onClick={start} style={{ padding: '10px 16px', bor
