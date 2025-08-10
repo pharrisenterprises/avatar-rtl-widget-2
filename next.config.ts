@@ -1,28 +1,30 @@
-import type { NextConfig } from 'next'
-
-const nextConfig: NextConfig = {
-  reactStrictMode: true,
+/** @type {import('next').NextConfig} */
+const nextConfig = {
   async headers() {
     return [
       {
-        source: '/(.*)',
+        source: '/:path*',
         headers: [
+          // Allow only your sites to embed the app in an iframe
           {
-            key: 'Access-Control-Allow-Origin',
-            value: 'https://pharrisenterprises-qjmtx.wpcomstaging.com',
+            key: 'Content-Security-Policy',
+            value: [
+              "frame-ancestors 'self'",
+              'https://*.godaddysites.com',
+              'https://*.godaddy.com',
+              'https://*.wpcomstaging.com',
+              'https://*.wordpress.com',
+              // your future custom domain when you point it to WP
+              'https://*.infinitysales.ai',
+              // (optional) this exact staging host too
+              'https://pharrisenterprises-qjmtx.wpcomstaging.com',
+            ].join(' '),
           },
-          {
-            key: 'Access-Control-Allow-Methods',
-            value: 'GET, POST, OPTIONS',
-          },
-          {
-            key: 'Access-Control-Allow-Headers',
-            value: 'X-Requested-With, Content-Type, Authorization',
-          },
+          // IMPORTANT: do NOT set X-Frame-Options: DENY/SAMEORIGIN anywhere else
         ],
       },
-    ]
+    ];
   },
-}
+};
 
-export default nextConfig
+module.exports = nextConfig;
