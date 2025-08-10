@@ -1,43 +1,49 @@
 (function () {
-  if (window.__aiWidgetLoaded) return;
-  window.__aiWidgetLoaded = true;
+  function createAssistantWidget() {
+    const widgetButton = document.createElement("div");
+    widgetButton.id = "assistant-widget-button";
+    widgetButton.style.position = "fixed";
+    widgetButton.style.bottom = "20px";
+    widgetButton.style.right = "20px";
+    widgetButton.style.width = "60px";
+    widgetButton.style.height = "60px";
+    widgetButton.style.background = "#0073ff";
+    widgetButton.style.borderRadius = "50%";
+    widgetButton.style.cursor = "pointer";
+    widgetButton.style.boxShadow = "0px 4px 12px rgba(0,0,0,0.3)";
+    widgetButton.style.zIndex = "999999";
+    widgetButton.innerHTML = '<span style="color:white;font-size:28px;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%)">&#128172;</span>';
 
-  var DOMAIN = 'https://avatar-rtl-widget-2.vercel.app'; // keep Vercel domain here
-  var SRC = DOMAIN + '/embed';
+    const iframeContainer = document.createElement("div");
+    iframeContainer.id = "assistant-widget-iframe-container";
+    iframeContainer.style.position = "fixed";
+    iframeContainer.style.bottom = "90px";
+    iframeContainer.style.right = "20px";
+    iframeContainer.style.width = "400px";
+    iframeContainer.style.height = "600px";
+    iframeContainer.style.background = "white";
+    iframeContainer.style.borderRadius = "10px";
+    iframeContainer.style.boxShadow = "0px 4px 12px rgba(0,0,0,0.3)";
+    iframeContainer.style.overflow = "hidden";
+    iframeContainer.style.display = "none";
+    iframeContainer.style.zIndex = "999999";
 
-  function ready(fn){ document.readyState === 'loading' ? document.addEventListener('DOMContentLoaded', fn) : fn(); }
+    const iframe = document.createElement("iframe");
+    iframe.src = "https://avatar-rtl-widget-2.vercel.app/embed";
+    iframe.style.width = "100%";
+    iframe.style.height = "100%";
+    iframe.style.border = "none";
 
-  ready(function () {
-    var css = `
-#aiw-launcher{position:fixed;right:18px;bottom:18px;z-index:999999;width:56px;height:56px;border-radius:50%;
-background:#111;color:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 6px 24px rgba(0,0,0,.35);cursor:pointer;user-select:none}
-#aiw-launcher:hover{background:#1a1a1a}
-#aiw-wrap{position:fixed;right:18px;bottom:82px;z-index:999998;width:420px;height:720px;display:none;box-shadow:0 10px 30px rgba(0,0,0,.45);border-radius:14px;overflow:hidden;background:#000}
-#aiw-top{position:absolute;left:0;right:0;top:0;height:38px;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:space-between;padding:0 10px;color:#fff}
-#aiw-iframe{position:absolute;top:38px;left:0;right:0;bottom:0;width:100%;height:calc(100% - 38px);border:0}
-@media(max-width:480px){#aiw-wrap{right:8px;bottom:82px;width:92vw;height:72vh}#aiw-launcher{right:8px;bottom:8px}}
-`;
-    var style = document.createElement('style'); style.appendChild(document.createTextNode(css)); document.head.appendChild(style);
+    iframeContainer.appendChild(iframe);
 
-    var launcher = document.createElement('div');
-    launcher.id = 'aiw-launcher';
-    launcher.setAttribute('aria-label','Open assistant');
-    launcher.innerHTML = '💬';
-    document.body.appendChild(launcher);
+    document.body.appendChild(widgetButton);
+    document.body.appendChild(iframeContainer);
 
-    var wrap = document.createElement('div');
-    wrap.id = 'aiw-wrap';
-    wrap.innerHTML = '<div id="aiw-top"><div>Assistant</div><div><button id="aiw-min" style="background:#222;color:#fff;border:0;border-radius:6px;padding:6px 8px;cursor:pointer;">Minimize</button></div></div><iframe id="aiw-iframe" allow="microphone; autoplay; camera; fullscreen; display-capture; clipboard-read; clipboard-write" referrerpolicy="no-referrer-when-downgrade"></iframe>';
-    document.body.appendChild(wrap);
+    widgetButton.addEventListener("click", function () {
+      iframeContainer.style.display =
+        iframeContainer.style.display === "none" ? "block" : "none";
+    });
+  }
 
-    var iframe = wrap.querySelector('#aiw-iframe');
-    iframe.src = SRC;
-
-    var open=false;
-    function show(){wrap.style.display='block';open=true;}
-    function hide(){wrap.style.display='none';open=false;}
-
-    launcher.addEventListener('click', function(){open?hide():show();});
-    wrap.querySelector('#aiw-min').addEventListener('click', hide);
-  });
+  window.addEventListener("load", createAssistantWidget);
 })();
