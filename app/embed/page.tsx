@@ -13,12 +13,12 @@ declare global {
   }
 }
 
-const MIC_AUTO_TIMEOUT_MS = 30_000; // 30s silence -> auto stop
+const MIC_AUTO_TIMEOUT_MS = 30_000; // 30s
 
 export default function EmbedAvatar() {
   const [status, setStatus] = useState<BuildStatus>('idle');
   const [chatId, setChatId] = useState<string>('');
-  const [muted, setMuted] = useState<boolean>(false);
+  const [muted, setMuted] = useState<boolean>(true); // start muted for autoplay
   const [micStatus, setMicStatus] = useState<MicStatus>('idle');
   const [captions, setCaptions] = useState<string[]>([]);
   const [showChat, setShowChat] = useState<boolean>(false);
@@ -26,6 +26,7 @@ export default function EmbedAvatar() {
   const [finalText, setFinalText] = useState<string>('');
   const [micAvailable, setMicAvailable] = useState<boolean>(false);
   const [loadingMic, setLoadingMic] = useState<boolean>(false);
+  const [streamReady, setStreamReady] = useState<boolean>(false);
 
   const avatarRef = useRef<any>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -37,25 +38,18 @@ export default function EmbedAvatar() {
   const speakQueueRef = useRef<string[]>([]);
   const speakingRef = useRef<boolean>(false);
 
-  // canvas
   const shell: React.CSSProperties = {
-    width: '100%',
-    height: '100%',
-    background: '#000',
-    color: '#fff',
+    width: '100%', height: '100%', background: '#000', color: '#fff',
     fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif',
-    position: 'relative',
-    overflow: 'hidden',
+    position: 'relative', overflow: 'hidden'
   };
 
-  // check speech API
   useEffect(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     setMicAvailable(!!SR);
     setMicStatus(SR ? 'idle' : 'unsupported');
   }, []);
 
-  // keep video mute in sync
   useEffect(() => {
     if (videoRef.current) {
       videoRef.current.muted = muted;
@@ -63,7 +57,11 @@ export default function EmbedAvatar() {
     }
   }, [muted]);
 
-  // ---- speak queue
+  function pushCaption(line: string) {
+    if (!line) return;
+    setCaptions(prev => [...prev.slice(-8), line]);
+  }
+
   function enqueueToSpeak(text: string) {
     const t = (text || '').trim();
     if (!t) return;
@@ -79,36 +77,41 @@ export default function EmbedAvatar() {
         const next = speakQueueRef.current.shift();
         if (!next) continue;
         await a.speak({ text: next, task_type: TaskType.REPEAT } as any);
-        setCaptions((prev) => [...prev.slice(-8), next]);
+        pushCaption(next);
       }
     } finally { speakingRef.current = false; }
   }
 
-  // ---- auto-start session (no Start button)
+  // Auto-start session on mount (so the moment the widget opens, avatar warms up)
   useEffect(() => {
     (async () => {
       if (status !== 'idle') return;
       try {
         setStatus('starting');
-
         const r1 = await fetch('/api/retell-chat/start', { method: 'POST' });
-        if (!r1.ok) throw new Error('Chat start failed');
+        if (!r1.ok) throw new Error('Chat start failed: ' + r1.status);
         const { chat_id } = await r1.json();
         setChatId(chat_id);
 
         const r2 = await fetch('/api/heygen-token', { method: 'POST' });
-        if (!r2.ok) throw new Error('HeyGen token failed');
+        if (!r2.ok) throw new Error('HeyGen token failed: ' + r2.status);
         const { token } = await r2.json();
+        if (!token) throw new Error('No token returned');
 
         const a = new StreamingAvatar({ token });
+
         a.on(StreamingEvents.STREAM_READY, (evt: any) => {
           const stream: MediaStream = evt.detail;
           if (videoRef.current) {
             videoRef.current.srcObject = stream;
-            videoRef.current.muted = muted;
-            videoRef.current.volume = muted ? 0 : 1;
+            videoRef.current.muted = true; // helps autoplay
             videoRef.current.play().catch(() => {});
           }
+          setStreamReady(true);
+          // Tell parent widget the stream is ready (optional)
+          try {
+            window.parent?.postMessage({ type: 'ai:stream-ready' }, '*');
+          } catch {}
         });
 
         const voiceId = process.env.NEXT_PUBLIC_HEYGEN_VOICE_ID || '';
@@ -117,10 +120,14 @@ export default function EmbedAvatar() {
         if (voiceId) opts.voice = { voiceId };
         if (avatarName) opts.avatarName = avatarName;
 
-        await a.createStartAvatar(opts);
+        await a.createStartAvatar(opts).catch((e: any) => {
+          pushCaption('❌ createStartAvatar error: ' + (e?.message || e));
+          throw e;
+        });
+
         avatarRef.current = a;
 
-        // light keepalive to avoid sleepy sessions
+        // Keepalive ping
         keepAliveRef.current = window.setInterval(() => {
           if (!chatId) return;
           fetch('/api/retell-chat/send', {
@@ -131,8 +138,9 @@ export default function EmbedAvatar() {
         }, 25_000);
 
         setStatus('ready');
-      } catch (e) {
+      } catch (e: any) {
         console.error(e);
+        pushCaption('❌ Start failed: ' + (e?.message || e));
         setStatus('error');
       }
     })();
@@ -140,35 +148,28 @@ export default function EmbedAvatar() {
     return () => {
       if (keepAliveRef.current) { window.clearInterval(keepAliveRef.current); keepAliveRef.current = null; }
     };
-  }, [status, muted, chatId]);
+  }, [status, chatId]);
 
-  // ---- send to agent (retry once if empty)
   async function sendTextToAgent(text: string) {
     if (!chatId || !avatarRef.current) return;
-    const trimmed = text.trim();
-    if (!trimmed) return;
+    const trimmed = text.trim(); if (!trimmed) return;
 
     async function sendOnce() {
       const r = await fetch('/api/retell-chat/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chat_id: chatId, content: trimmed })
       });
-      if (!r.ok) throw new Error('send fail');
+      if (!r.ok) throw new Error('send fail ' + r.status);
       const data = await r.json();
       return (data?.text || '').trim();
     }
 
     let agentText = '';
     try { agentText = await sendOnce(); } catch {}
-    if (!agentText) {
-      await new Promise(res => setTimeout(res, 700));
-      try { agentText = await sendOnce(); } catch {}
-    }
+    if (!agentText) { await new Promise(r => setTimeout(r, 700)); try { agentText = await sendOnce(); } catch {} }
     if (agentText) { enqueueToSpeak(agentText); await drainSpeakQueue(); }
   }
 
-  // ---- mic
   function initRecognition() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) return null;
@@ -221,6 +222,9 @@ export default function EmbedAvatar() {
         setMicStatus('listening');
         setLoadingMic(false);
 
+        // safe to unmute after a user gesture (mic click)
+        setMuted(false);
+
         if (autoStopMicTimerRef.current) window.clearTimeout(autoStopMicTimerRef.current);
         autoStopMicTimerRef.current = window.setTimeout(() => { stopMic(true); }, MIC_AUTO_TIMEOUT_MS);
       })
@@ -238,43 +242,59 @@ export default function EmbedAvatar() {
     setMicStatus('idle');
   }
 
-  // fullscreen
   function goFullscreen() {
     const el = document.documentElement;
     if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
   }
 
-  // overlay controls
   const btn = (style: React.CSSProperties) => ({
-    background: 'rgba(20,20,20,0.75)',
-    color: '#fff',
+    background: 'rgba(20,20,20,0.75)', color: '#fff',
     border: '1px solid rgba(255,255,255,0.15)',
-    borderRadius: 10,
-    padding: '8px 10px',
-    cursor: 'pointer',
-    fontSize: 14,
-    ...style
+    borderRadius: 10, padding: '8px 10px', cursor: 'pointer', fontSize: 14, ...style
   });
+
+  // Poster (covers black gap until streamReady)
+  const Poster = (
+    <div style={{
+      position:'absolute', inset:0,
+      background:'linear-gradient(180deg, #111 0%, #1b1b1b 100%)',
+      display:'flex', alignItems:'center', justifyContent:'center', flexDirection:'column'
+    }}>
+      <div style={{width:64, height:64, borderRadius:'50%', border:'3px solid rgba(255,255,255,0.2)', borderTopColor:'#fff', animation:'spin 1s linear infinite'}} />
+      <div style={{marginTop:14, opacity:0.8}}>Warming up avatar…</div>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+    </div>
+  );
 
   return (
     <div style={shell}>
-      {/* Video */}
-      <video ref={videoRef} autoPlay playsInline style={{ width:'100%', height:'100%', objectFit:'cover' }} />
+      {/* Show poster until the stream is actually ready */}
+      {!streamReady && Poster}
 
-      {/* blur loading when starting or asking mic permission */}
-      {(status !== 'ready' || loadingMic) && (
+      {/* Video appears as soon as stream is ready */}
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        style={{
+          width:'100%', height:'100%', objectFit:'cover',
+          opacity: streamReady ? 1 : 0, transition:'opacity .25s ease'
+        }}
+      />
+
+      {(status !== 'ready' || loadingMic) && streamReady && (
         <div style={{
-          position:'absolute', inset:0, backdropFilter:'blur(4px)', background:'rgba(0,0,0,0.35)',
+          position:'absolute', inset:0, backdropFilter:'blur(2px)',
+          background:'rgba(0,0,0,0.25)',
           display:'flex', alignItems:'center', justifyContent:'center', fontSize:16
         }}>
           {status !== 'ready' ? 'Starting session…' : 'Hang tight… opening microphone'}
         </div>
       )}
 
-      {/* top-left: close captions hint */}
       <div style={{position:'absolute', left:10, top:10, fontSize:12, opacity:0.7}}>Status: {status}</div>
 
-      {/* top-right: tiny controls */}
       <div style={{ position:'absolute', right:10, top:10, display:'flex', gap:6 }}>
         <button onClick={() => setMuted(m => !m)} style={btn({})} aria-label="Mute/unmute">
           {muted ? '🔇' : '🔊'}
@@ -283,7 +303,6 @@ export default function EmbedAvatar() {
         <button onClick={() => setShowChat(v => !v)} style={btn({})} aria-label="Chat">💬</button>
       </div>
 
-      {/* bottom-center: mic + captions */}
       <div style={{ position:'absolute', left:0, right:0, bottom:14, display:'flex', alignItems:'center', justifyContent:'center', gap:8, flexWrap:'wrap' }}>
         <button
           onClick={micStatus === 'listening' ? () => stopMic(true) : startMic}
@@ -303,7 +322,6 @@ export default function EmbedAvatar() {
         </div>
       </div>
 
-      {/* chat overlay */}
       {showChat && (
         <div style={{
           position:'absolute', right:10, bottom:68, width:300,
