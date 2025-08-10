@@ -1,12 +1,14 @@
-/** @type {import('next').NextConfig} */
-const nextConfig = {
+// next.config.ts
+import type { NextConfig } from 'next';
+
+const nextConfig: NextConfig = {
   async headers() {
     return [
       {
         source: '/:path*',
         headers: [
-          // Allow only your sites to embed the app in an iframe
           {
+            // Allow only your sites to embed the Vercel app in an <iframe>
             key: 'Content-Security-Policy',
             value: [
               "frame-ancestors 'self'",
@@ -14,17 +16,15 @@ const nextConfig = {
               'https://*.godaddy.com',
               'https://*.wpcomstaging.com',
               'https://*.wordpress.com',
-              // your future custom domain when you point it to WP
               'https://*.infinitysales.ai',
-              // (optional) this exact staging host too
               'https://pharrisenterprises-qjmtx.wpcomstaging.com',
             ].join(' '),
           },
-          // IMPORTANT: do NOT set X-Frame-Options: DENY/SAMEORIGIN anywhere else
+          // IMPORTANT: do not set X-Frame-Options anywhere (it conflicts with CSP)
         ],
       },
     ];
   },
 };
 
-module.exports = nextConfig;
+export default nextConfig;
