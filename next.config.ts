@@ -5,13 +5,16 @@ const nextConfig = {
       {
         source: '/:path*',
         headers: [
-          // Be specific: list your real domain(s)
-          { key: 'Content-Security-Policy', value: "frame-ancestors 'self' https://*.godaddysites.com https://*.godaddy.com;" },
-          // Avoid X-Frame-Options DENY/SAMEORIGIN if you set it elsewhere
-        ],
-      },
+          {
+            key: 'Content-Security-Policy',
+            value:
+              "frame-ancestors 'self' https://*.godaddysites.com https://*.godaddy.com https://avatar-rtl-widget-2.vercel.app;"
+          }
+          // If you have other security headers, make sure they don't conflict
+        ]
+      }
     ];
-  },
+  }
 };
 
 module.exports = nextConfig;
