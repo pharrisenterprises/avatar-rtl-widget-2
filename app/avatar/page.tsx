@@ -12,20 +12,24 @@ type Status = 'idle' | 'starting' | 'ready' | 'error';
 
 export default function AvatarBridge() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const [status, setStatus] = useState<'idle' | 'starting' | 'ready' | 'error'>('idle');
+  const [status, setStatus] = useState<Status>('idle');
   const [msg, setMsg] = useState('Click Start to begin Retell + Avatar.');
   const [avatar, setAvatar] = useState<StreamingAvatar | null>(null);
 
+  // Captions (final lines we asked HeyGen to say)
   const [captions, setCaptions] = useState<string[]>([]);
+
+  // Buffer we fill from Retell streaming updates (agent text)
   const agentBufferRef = useRef<string>('');
+
+  // Queue so avatar lines don't overlap — we’ll enqueue even before avatar exists
   const speakQueueRef = useRef<string[]>([]);
   const speakingRef = useRef<boolean>(false);
 
   async function safeSpeak(a: StreamingAvatar, text: string) {
     try {
       console.log('[HeyGen] speak() try:', text);
-      // task_type: 'repeat' (mirror our text); taskMode 'sync' for simpler flow
-      await a.speak({ text, task_type: 'repeat', taskMode: 'sync' } as any);
+      await a.speak({ text, task_type: TaskType.REPEAT } as any);
       setCaptions(prev => [...prev.slice(-8), text]);
       console.log('[HeyGen] speak() ok');
     } catch (err) {
@@ -48,9 +52,18 @@ export default function AvatarBridge() {
     }
   }
 
-  function extractAgentTextFromUpdate(evt: any): string | null {
-    const role = evt?.role || evt?.speaker || evt?.source || evt?.who;
-    if (role && String(role).toLowerCase().includes('user')) return null;
+  function pushFinalAgentText(text?: string) {
+    const finalText = (text || agentBufferRef.current).trim();
+    agentBufferRef.current = '';
+    if (!finalText) return;
+    console.log('[Bridge] enqueue:', finalText);
+    speakQueueRef.current.push(finalText);
+    if (avatar) void drainSpeakQueue(avatar);
+  }
+
+  function extractAgentText(evt: any): string | null {
+    const role = (evt?.role || evt?.speaker || evt?.source || evt?.who || '').toString().toLowerCase();
+    if (role.includes('user')) return null;
     const text = evt?.text ?? evt?.transcript ?? evt?.content ?? evt?.message ?? null;
     return typeof text === 'string' && text.trim() ? text.trim() : null;
   }
@@ -69,20 +82,22 @@ export default function AvatarBridge() {
       await retell.startCall({ accessToken: access_token });
       console.log('[Retell] call started');
 
-      retell.on?.('update', (evt: any) => {
-        const t = extractAgentTextFromUpdate(evt);
-        if (t) agentBufferRef.current = (agentBufferRef.current + ' ' + t).slice(-800);
-      });
-
-      retell.on?.('agent_stop_talking', (evt: any) => {
-        const finalText = evt?.text || evt?.transcript || agentBufferRef.current.trim();
-        agentBufferRef.current = '';
-        console.log('[Retell] agent_stop_talking:', finalText);
-        if (finalText && avatar) {
-          speakQueueRef.current.push(finalText);
-          void drainSpeakQueue(avatar);
+      // === Retell event listeners (cast a wide net) ===
+      const onUpdate = (evt: any) => {
+        const t = extractAgentText(evt);
+        if (t) {
+          agentBufferRef.current = (agentBufferRef.current + ' ' + t).slice(-1000);
         }
-      });
+      };
+
+      // Some SDKs emit these; we log all to see which ones fire:
+      retell.on?.('update', (e: any) => { console.log('[Retell] update', e); onUpdate(e); });
+      retell.on?.('agent_stop_talking', (e: any) => { console.log('[Retell] agent_stop_talking', e); pushFinalAgentText(e?.text || e?.transcript); });
+      retell.on?.('agent_start_talking', (e: any) => { console.log('[Retell] agent_start_talking', e); });
+      retell.on?.('agent_message', (e: any) => { console.log('[Retell] agent_message', e); pushFinalAgentText(e?.text); });
+      retell.on?.('agent_response', (e: any) => { console.log('[Retell] agent_response', e); pushFinalAgentText(e?.text); });
+      retell.on?.('final_text', (e: any) => { console.log('[Retell] final_text', e); pushFinalAgentText(e?.text); });
+      retell.on?.('partial_text', (e: any) => { console.log('[Retell] partial_text', e); onUpdate(e); });
 
       // 2) HeyGen
       const heygenRes = await fetch('/api/heygen-token', { method: 'POST' });
@@ -95,6 +110,8 @@ export default function AvatarBridge() {
         const stream: MediaStream = evt.detail;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
+          // Unmute now that we had a user gesture (click)
+          videoRef.current.muted = false;
           videoRef.current.play().catch(() => {});
         }
         console.log('[HeyGen] stream ready');
@@ -109,13 +126,16 @@ export default function AvatarBridge() {
 
       await a.createStartAvatar(opts);
       console.log('[HeyGen] avatar session started with', opts);
+
       setAvatar(a);
       setStatus('ready');
-      setMsg('Live! Speak to the agent; avatar mirrors agent replies.');
+      setMsg('Live! Talk to the agent. The avatar will mirror agent replies.');
 
-      // FORCE a test line so we see lips move even before Retell
-      await safeSpeak(a, 'Testing lip sync. One two three.');
+      // Drain anything that queued before avatar existed
+      void drainSpeakQueue(a);
 
+      // One forced line to verify lips + audio
+      await safeSpeak(a, 'Lip sync test. You should see my mouth move, and hear my voice.');
     } catch (e: any) {
       console.error(e);
       setStatus('error');
@@ -125,14 +145,14 @@ export default function AvatarBridge() {
 
   async function sayTest() {
     if (!avatar) return;
-    await safeSpeak(avatar, 'This is a manual test line. The avatar should move its lips now.');
+    await safeSpeak(avatar, 'This is a manual test line. The avatar should move its lips and you should hear me.');
   }
 
   return (
     <main style={{ padding: 24, maxWidth: 980, margin: '0 auto', fontFamily: 'system-ui' }}>
       <h1>Retell x HeyGen Avatar Bridge - /avatar</h1>
       <p>Status: <strong>{status}</strong></p>
-      <div style={{ display: 'flex', gap: 8 }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <button onClick={start} style={{ padding: '10px 16px', borderRadius: 8, cursor: 'pointer' }}>
           Start
         </button>
@@ -146,10 +166,11 @@ export default function AvatarBridge() {
         ref={videoRef}
         autoPlay
         playsInline
-        muted
+        /* key fix: do NOT hard-mute; we unmute after Start */
         style={{ width: '100%', maxWidth: 860, aspectRatio: '16/9', background: '#000', borderRadius: 12, marginTop: 16 }}
       />
 
+      {/* Captions (what we send to HeyGen) */}
       <div
         style={{
           marginTop: 12,
