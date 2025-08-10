@@ -9,6 +9,7 @@ import StreamingAvatar, {
 } from '@heygen/streaming-avatar';
 
 type Status = 'idle' | 'starting' | 'ready' | 'error';
+type TranscriptItem = { role?: string; speaker?: string; source?: string; who?: string; text?: string; transcript?: string; content?: string; message?: string };
 
 export default function AvatarBridge() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -16,19 +17,21 @@ export default function AvatarBridge() {
   const [msg, setMsg] = useState('Click Start to begin Retell + Avatar.');
   const [avatar, setAvatar] = useState<StreamingAvatar | null>(null);
 
-  // Captions (final lines we asked HeyGen to say)
+  // Captions (what we send to HeyGen)
   const [captions, setCaptions] = useState<string[]>([]);
 
-  // Buffer we fill from Retell streaming updates (agent text)
-  const agentBufferRef = useRef<string>('');
+  // For deduping: remember last agent line we spoke
+  const lastAgentLineRef = useRef<string>('');
 
-  // Queue so avatar lines don't overlap — we’ll enqueue even before avatar exists
+  // Queue so avatar lines don't overlap
   const speakQueueRef = useRef<string[]>([]);
   const speakingRef = useRef<boolean>(false);
 
+  // ---- speaking helpers ----
   async function safeSpeak(a: StreamingAvatar, text: string) {
     try {
       console.log('[HeyGen] speak() try:', text);
+      // Repeat mode = use our text exactly
       await a.speak({ text, task_type: TaskType.REPEAT } as any);
       setCaptions(prev => [...prev.slice(-8), text]);
       console.log('[HeyGen] speak() ok');
@@ -52,20 +55,37 @@ export default function AvatarBridge() {
     }
   }
 
-  function pushFinalAgentText(text?: string) {
-    const finalText = (text || agentBufferRef.current).trim();
-    agentBufferRef.current = '';
-    if (!finalText) return;
-    console.log('[Bridge] enqueue:', finalText);
-    speakQueueRef.current.push(finalText);
+  function enqueue(text: string) {
+    const t = text.trim();
+    if (!t) return;
+    if (t === lastAgentLineRef.current) return; // avoid repeats
+    lastAgentLineRef.current = t;
+    console.log('[Bridge] enqueue agent line:', t);
+    speakQueueRef.current.push(t);
     if (avatar) void drainSpeakQueue(avatar);
   }
 
-  function extractAgentText(evt: any): string | null {
-    const role = (evt?.role || evt?.speaker || evt?.source || evt?.who || '').toString().toLowerCase();
-    if (role.includes('user')) return null;
-    const text = evt?.text ?? evt?.transcript ?? evt?.content ?? evt?.message ?? null;
+  // Pull agent text from a transcript item / update payload
+  function extractText(x: any): string | null {
+    const roleRaw = (x?.role || x?.speaker || x?.source || x?.who || '').toString().toLowerCase();
+    if (roleRaw.includes('user')) return null;
+    const text = x?.text ?? x?.transcript ?? x?.content ?? x?.message ?? null;
     return typeof text === 'string' && text.trim() ? text.trim() : null;
+  }
+
+  // Given update.transcript (array of last few sentences), take the latest agent sentence
+  function handleTranscriptUpdate(update: any) {
+    const arr = Array.isArray(update?.transcript) ? (update.transcript as TranscriptItem[]) : [];
+    if (!arr.length) return;
+
+    // Find the last item whose role is not user, then extract text
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const text = extractText(arr[i]);
+      if (text) {
+        enqueue(text);
+        break;
+      }
+    }
   }
 
   async function start() {
@@ -73,33 +93,31 @@ export default function AvatarBridge() {
       setStatus('starting');
       setMsg('Requesting tokens...');
 
-      // 1) Retell
+      // 1) Retell (web call)
       const retellRes = await fetch('/api/retell-webcall', { method: 'POST' });
       if (!retellRes.ok) throw new Error('Retell token failed: ' + retellRes.status);
       const { access_token } = await retellRes.json();
 
       const retell = new RetellWebClient();
-      await retell.startCall({ accessToken: access_token });
+      await retell.startCall({
+        accessToken: access_token,
+        // Optionally set sampleRate/playback/capture devices here
+        // emitRawAudioSamples: false,
+      });
       console.log('[Retell] call started');
 
-      // === Retell event listeners (cast a wide net) ===
-      const onUpdate = (evt: any) => {
-        const t = extractAgentText(evt);
-        if (t) {
-          agentBufferRef.current = (agentBufferRef.current + ' ' + t).slice(-1000);
-        }
-      };
+      // The Retell doc says transcript is on `update.transcript` (rolling window). We use that.
+      retell.on?.('update', (u: any) => {
+        console.log('[Retell] update', u);
+        handleTranscriptUpdate(u);
+      });
 
-      // Some SDKs emit these; we log all to see which ones fire:
-      retell.on?.('update', (e: any) => { console.log('[Retell] update', e); onUpdate(e); });
-      retell.on?.('agent_stop_talking', (e: any) => { console.log('[Retell] agent_stop_talking', e); pushFinalAgentText(e?.text || e?.transcript); });
-      retell.on?.('agent_start_talking', (e: any) => { console.log('[Retell] agent_start_talking', e); });
-      retell.on?.('agent_message', (e: any) => { console.log('[Retell] agent_message', e); pushFinalAgentText(e?.text); });
-      retell.on?.('agent_response', (e: any) => { console.log('[Retell] agent_response', e); pushFinalAgentText(e?.text); });
-      retell.on?.('final_text', (e: any) => { console.log('[Retell] final_text', e); pushFinalAgentText(e?.text); });
-      retell.on?.('partial_text', (e: any) => { console.log('[Retell] partial_text', e); onUpdate(e); });
+      // Helpful logs; some SDKs also fire these but they don’t carry text
+      retell.on?.('agent_start_talking', (e: any) => console.log('[Retell] agent_start_talking', e));
+      retell.on?.('agent_stop_talking', (e: any) => console.log('[Retell] agent_stop_talking', e));
+      retell.on?.('error', (e: any) => console.error('[Retell] error', e));
 
-      // 2) HeyGen
+      // 2) HeyGen session + video
       const heygenRes = await fetch('/api/heygen-token', { method: 'POST' });
       if (!heygenRes.ok) throw new Error('HeyGen token failed: ' + heygenRes.status);
       const { token } = await heygenRes.json();
@@ -110,14 +128,14 @@ export default function AvatarBridge() {
         const stream: MediaStream = evt.detail;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
-          // Unmute now that we had a user gesture (click)
+          // unmute now that we had a click (user gesture)
           videoRef.current.muted = false;
           videoRef.current.play().catch(() => {});
         }
         console.log('[HeyGen] stream ready');
       });
 
-      const voiceId = process.env.NEXT_PUBLIC_HEYGEN_VOICE_ID || '';
+      const voiceId = process.env.NEXT_PUBLIC_HEYGEN_VOICE_ID || '';      // AU male voice id
       const avatarName = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_NAME || ''; // e.g. Graham_Chair_Sitting_public
 
       const opts: any = { quality: AvatarQuality.High };
@@ -129,13 +147,13 @@ export default function AvatarBridge() {
 
       setAvatar(a);
       setStatus('ready');
-      setMsg('Live! Talk to the agent. The avatar will mirror agent replies.');
+      setMsg('Live! The avatar will mirror Retell replies.');
 
-      // Drain anything that queued before avatar existed
+      // Drain any queued lines that came in before avatar was ready
       void drainSpeakQueue(a);
 
-      // One forced line to verify lips + audio
-      await safeSpeak(a, 'Lip sync test. You should see my mouth move, and hear my voice.');
+      // One forced line so you see/hear it immediately
+      await safeSpeak(a, 'Lip sync link is live. I will mirror the agent.');
     } catch (e: any) {
       console.error(e);
       setStatus('error');
@@ -166,7 +184,7 @@ export default function AvatarBridge() {
         ref={videoRef}
         autoPlay
         playsInline
-        /* key fix: do NOT hard-mute; we unmute after Start */
+        // do not hard-mute; we unmute in STREAM_READY
         style={{ width: '100%', maxWidth: 860, aspectRatio: '16/9', background: '#000', borderRadius: 12, marginTop: 16 }}
       />
 
@@ -194,4 +212,4 @@ export default function AvatarBridge() {
       </div>
     </main>
   );
-}
+}:contentReference[oaicite:2]{index=2}
