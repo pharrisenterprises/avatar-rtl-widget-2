@@ -18,10 +18,10 @@ const MIC_AUTO_TIMEOUT_MS = 30_000; // 30s
 export default function EmbedAvatar() {
   const [status, setStatus] = useState<BuildStatus>('idle');
   const [chatId, setChatId] = useState<string>('');
-  const [muted, setMuted] = useState<boolean>(true); // start muted for autoplay
+  const [muted, setMuted] = useState<boolean>(true);
   const [micStatus, setMicStatus] = useState<MicStatus>('idle');
   const [captions, setCaptions] = useState<string[]>([]);
-  const [showChat, setShowChat] = useState<boolean>(false);
+  const [showChat, setShowChat] = useState<boolean>(false); // <-- captions live in chat overlay
   const [interim, setInterim] = useState<string>('');
   const [finalText, setFinalText] = useState<string>('');
   const [micAvailable, setMicAvailable] = useState<boolean>(false);
@@ -59,7 +59,7 @@ export default function EmbedAvatar() {
 
   function pushCaption(line: string) {
     if (!line) return;
-    setCaptions(prev => [...prev.slice(-8), line]);
+    setCaptions(prev => [...prev.slice(-12), line]);
   }
 
   function enqueueToSpeak(text: string) {
@@ -82,36 +82,37 @@ export default function EmbedAvatar() {
     } finally { speakingRef.current = false; }
   }
 
-  // Auto-start session on mount (so the moment the widget opens, avatar warms up)
+  // Start the avatar session as soon as the iframe loads (so it’s ready when panel opens)
   useEffect(() => {
     (async () => {
       if (status !== 'idle') return;
       try {
         setStatus('starting');
+
+        // 1) Retell chat start
         const r1 = await fetch('/api/retell-chat/start', { method: 'POST' });
         if (!r1.ok) throw new Error('Chat start failed: ' + r1.status);
         const { chat_id } = await r1.json();
         setChatId(chat_id);
 
+        // 2) HeyGen token
         const r2 = await fetch('/api/heygen-token', { method: 'POST' });
         if (!r2.ok) throw new Error('HeyGen token failed: ' + r2.status);
         const { token } = await r2.json();
         if (!token) throw new Error('No token returned');
 
+        // 3) Start streaming avatar
         const a = new StreamingAvatar({ token });
 
         a.on(StreamingEvents.STREAM_READY, (evt: any) => {
           const stream: MediaStream = evt.detail;
           if (videoRef.current) {
             videoRef.current.srcObject = stream;
-            videoRef.current.muted = true; // helps autoplay
+            videoRef.current.muted = true;
             videoRef.current.play().catch(() => {});
           }
           setStreamReady(true);
-          // Tell parent widget the stream is ready (optional)
-          try {
-            window.parent?.postMessage({ type: 'ai:stream-ready' }, '*');
-          } catch {}
+          try { window.parent?.postMessage({ type: 'ai:stream-ready' }, '*'); } catch {}
         });
 
         const voiceId = process.env.NEXT_PUBLIC_HEYGEN_VOICE_ID || '';
@@ -222,7 +223,7 @@ export default function EmbedAvatar() {
         setMicStatus('listening');
         setLoadingMic(false);
 
-        // safe to unmute after a user gesture (mic click)
+        // Unmute only after user gesture
         setMuted(false);
 
         if (autoStopMicTimerRef.current) window.clearTimeout(autoStopMicTimerRef.current);
@@ -253,7 +254,7 @@ export default function EmbedAvatar() {
     borderRadius: 10, padding: '8px 10px', cursor: 'pointer', fontSize: 14, ...style
   });
 
-  // Poster (covers black gap until streamReady)
+  // Poster (covers any black before stream is ready)
   const Poster = (
     <div style={{
       position:'absolute', inset:0,
@@ -268,10 +269,8 @@ export default function EmbedAvatar() {
 
   return (
     <div style={shell}>
-      {/* Show poster until the stream is actually ready */}
       {!streamReady && Poster}
 
-      {/* Video appears as soon as stream is ready */}
       <video
         ref={videoRef}
         autoPlay
@@ -293,17 +292,17 @@ export default function EmbedAvatar() {
         </div>
       )}
 
-      <div style={{position:'absolute', left:10, top:10, fontSize:12, opacity:0.7}}>Status: {status}</div>
-
+      {/* Top-right controls (inside the image) */}
       <div style={{ position:'absolute', right:10, top:10, display:'flex', gap:6 }}>
         <button onClick={() => setMuted(m => !m)} style={btn({})} aria-label="Mute/unmute">
           {muted ? '🔇' : '🔊'}
         </button>
-        <button onClick={goFullscreen} style={btn({})} aria-label="Fullscreen">⤢</button>
         <button onClick={() => setShowChat(v => !v)} style={btn({})} aria-label="Chat">💬</button>
+        <button onClick={goFullscreen} style={btn({})} aria-label="Fullscreen">⤢</button>
       </div>
 
-      <div style={{ position:'absolute', left:0, right:0, bottom:14, display:'flex', alignItems:'center', justifyContent:'center', gap:8, flexWrap:'wrap' }}>
+      {/* Bottom center: mic only */}
+      <div style={{ position:'absolute', left:0, right:0, bottom:14, display:'flex', alignItems:'center', justifyContent:'center' }}>
         <button
           onClick={micStatus === 'listening' ? () => stopMic(true) : startMic}
           disabled={!micAvailable || status !== 'ready'}
@@ -312,21 +311,24 @@ export default function EmbedAvatar() {
         >
           {micStatus === 'unsupported' ? 'Mic not supported' : micStatus === 'listening' ? 'Stop Mic' : 'Start Mic'}
         </button>
-
-        <div style={{
-          maxWidth:'80%', minWidth:220, background:'rgba(0,0,0,0.55)', border:'1px solid rgba(255,255,255,0.12)',
-          padding:'8px 10px', borderRadius:10, fontSize:14, lineHeight:1.35, maxHeight:96, overflow:'auto'
-        }}>
-          {captions.length === 0 ? <span style={{opacity:0.6}}>Captions…</span> :
-            captions.slice(-3).map((c,i) => <div key={i} style={{margin:'4px 0'}}>• {c}</div>)}
-        </div>
       </div>
 
+      {/* Chat overlay (includes captions list and text input). Hidden until 💬 is clicked */}
       {showChat && (
         <div style={{
-          position:'absolute', right:10, bottom:68, width:300,
+          position:'absolute', right:10, bottom:68, width:320,
           background:'rgba(15,15,15,0.95)', border:'1px solid rgba(255,255,255,0.15)', borderRadius:12, padding:10
         }}>
+          <div style={{
+            maxHeight:140, overflow:'auto', marginBottom:8,
+            background:'rgba(0,0,0,0.4)', border:'1px solid rgba(255,255,255,0.1)',
+            borderRadius:8, padding:'8px 10px', fontSize:14, lineHeight:1.35
+          }}>
+            {captions.length === 0
+              ? <span style={{opacity:0.6}}>Captions…</span>
+              : captions.slice(-8).map((c,i) => <div key={i} style={{margin:'4px 0'}}>• {c}</div>)
+            }
+          </div>
           <div style={{display:'flex', gap:6}}>
             <input
               placeholder="Type a message"
