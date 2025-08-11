@@ -8,8 +8,8 @@ const nextConfig: NextConfig = {
         source: '/:path*',
         headers: [
           {
-            // Allow only your sites to embed the Vercel app in an <iframe>
             key: 'Content-Security-Policy',
+            // allow the landing site to iframe the avatar
             value: [
               "frame-ancestors 'self'",
               'https://*.godaddysites.com',
@@ -17,14 +17,15 @@ const nextConfig: NextConfig = {
               'https://*.wpcomstaging.com',
               'https://*.wordpress.com',
               'https://*.infinitysales.ai',
-              'https://pharrisenterprises-qjmtx.wpcomstaging.com',
-            ].join(' '),
-          },
-          // IMPORTANT: do not set X-Frame-Options anywhere (it conflicts with CSP)
-        ],
-      },
+              'https://*.vercel.app',                         // <— add this
+              'https://pharrisenterprises-qjmtx.wpcomstaging.com'
+            ].join(' ')
+          }
+          // Do NOT set X-Frame-Options anywhere; CSP replaces it.
+        ]
+      }
     ];
-  },
+  }
 };
 
 export default nextConfig;
