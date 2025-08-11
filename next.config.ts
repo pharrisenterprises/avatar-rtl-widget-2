@@ -1,4 +1,4 @@
-// next.config.ts
+// next.config.ts  (avatar-rtl-widget-2)
 import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
@@ -8,8 +8,8 @@ const nextConfig: NextConfig = {
         source: '/:path*',
         headers: [
           {
+            // Allow your sites to embed this app in an <iframe>
             key: 'Content-Security-Policy',
-            // allow the landing site to iframe the avatar
             value: [
               "frame-ancestors 'self'",
               'https://*.godaddysites.com',
@@ -17,15 +17,18 @@ const nextConfig: NextConfig = {
               'https://*.wpcomstaging.com',
               'https://*.wordpress.com',
               'https://*.infinitysales.ai',
-              'https://*.vercel.app',                         // <— add this
-              'https://pharrisenterprises-qjmtx.wpcomstaging.com'
-            ].join(' ')
-          }
-          // Do NOT set X-Frame-Options anywhere; CSP replaces it.
-        ]
-      }
+              // 👇 add Vercel landing domains
+              'https://*.vercel.app',
+              // If you prefer to be very strict, you can replace the line above
+              // with the exact landing host:
+              // 'https://infinity-landing-*.vercel.app'
+            ].join(' '),
+          },
+          // IMPORTANT: do not set X-Frame-Options anywhere (it conflicts with CSP)
+        ],
+      },
     ];
-  }
+  },
 };
 
 export default nextConfig;
