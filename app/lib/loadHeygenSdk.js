@@ -1,86 +1,64 @@
 // app/lib/loadHeygenSdk.js
-// Loads HeyGen Streaming Avatar SDK with multiple fallbacks.
-// 1) jsDelivr (UMD) → 2) unpkg (UMD) → 3) esm.sh (module) → 4) local /heygen.umd.js (module or UMD)
-// Succeeds when window.HeyGenStreamingAvatar is available.
-
-const TIMEOUT_MS = 15000;
-
-function waitForGlobal(name, timeout = TIMEOUT_MS) {
-  return new Promise((res, rej) => {
-    const started = Date.now();
-    (function poll() {
-      if (globalThis[name]) return res(globalThis[name]);
-      if (Date.now() - started > timeout) return rej(new Error(`Timeout waiting for ${name}`));
-      setTimeout(poll, 50);
-    })();
-  });
-}
-
-function injectScript(src, { module = false } = {}) {
-  return new Promise((res, rej) => {
-    const s = document.createElement('script');
-    if (module) s.type = 'module';
-    s.src = src;
-    s.async = true;
-    s.onload = () => res();
-    s.onerror = () => rej(new Error(`Failed to load ${src}`));
-    document.head.appendChild(s);
-  });
-}
-
-async function tryLoad() {
-  // Try plain UMDs first
-  const umds = [
-    'https://cdn.jsdelivr.net/npm/@heygen/streaming-avatar@latest/dist/index.umd.js',
-    'https://unpkg.com/@heygen/streaming-avatar@latest/dist/index.umd.js'
-  ];
-
-  for (const url of umds) {
-    try {
-      await injectScript(url);
-      await waitForGlobal('HeyGenStreamingAvatar', 5000);
-      return globalThis.HeyGenStreamingAvatar;
-    } catch (_) {}
-  }
-
-  // Try esm.sh as a module that assigns to window
-  // The ?bundle builds a single file; we set a global name via an inlined helper
-  try {
-    await injectScript(
-      `data:text/javascript;charset=utf-8,` +
-      encodeURIComponent(`
-        import HG from "https://esm.sh/@heygen/streaming-avatar@2.0.16?bundle&target=es2018";
-        window.HeyGenStreamingAvatar = HG?.default ?? HG;
-      `),
-      { module: true }
-    );
-    await waitForGlobal('HeyGenStreamingAvatar', 7000);
-    return globalThis.HeyGenStreamingAvatar;
-  } catch (_) {}
-
-  // Last resort: load your *local* copy (module) and set the global
-  // (works if you saved a working build at /heygen.umd.js or a module build)
-  try {
-    await injectScript(
-      `data:text/javascript;charset=utf-8,` +
-      encodeURIComponent(`
-        import HG from "/heygen.umd.js";
-        window.HeyGenStreamingAvatar = HG?.default ?? HG;
-      `),
-      { module: true }
-    );
-    await waitForGlobal('HeyGenStreamingAvatar', 7000);
-    return globalThis.HeyGenStreamingAvatar;
-  } catch (e) {
-    throw new Error('Failed to load HeyGen Streaming Avatar SDK from all sources.');
-  }
-}
-
-let loadingPromise = null;
-
-/** Call this from your pages before you start the avatar */
 export async function loadHeygenSdk() {
-  if (globalThis.HeyGenStreamingAvatar) return globalThis.HeyGenStreamingAvatar;
-  if (!loadingPromise) loadingPromise = tryLoad();
-  return loadingPromise;
+  if (typeof window === 'undefined') throw new Error('SDK must load in the browser');
+
+  if (window.HeyGenStreamingAvatar) return window.HeyGenStreamingAvatar;
+
+  // Preferred pinned version – adjust only if HeyGen asks you to
+  const CDN = 'https://cdn.jsdelivr.net/npm/@heygen/streaming-avatar@2.0.16/dist/index.umd.js';
+  const UNPKG = 'https://unpkg.com/@heygen/streaming-avatar@2.0.16/dist/index.umd.js';
+
+  // Local shim (we’ll create this next). It dynamically imports from esm.sh and
+  // sets window.HeyGenStreamingAvatar. Because the import is async, we also poll.
+  const LOCAL = '/heygen.umd.js';
+
+  // As a last-ditch, a data: URL that does a dynamic import from esm.sh.
+  const DATA_ESM =
+    "data:text/javascript,(async()=>{try{const m=await import('https://esm.sh/@heygen/streaming-avatar@2.0.16?bundle&target=es2017');window.HeyGenStreamingAvatar=m.default||m;}catch(e){console.error('[heygen data import failed]',e);}})();";
+
+  const sources = [CDN, UNPKG, LOCAL, DATA_ESM];
+
+  // Helper to add a script tag and (optionally) poll for the global
+  async function addScript(src) {
+    await new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      if (src.startsWith('data:')) {
+        // data: scripts can’t be cached; just inject
+        s.src = src;
+      } else {
+        s.src = src + (src.includes('?') ? '&' : '?') + 'v=' + Date.now();
+      }
+      s.async = true;
+      s.onload = () => resolve();
+      s.onerror = () => reject(new Error('load failed: ' + src));
+      document.head.appendChild(s);
+    });
+
+    // If the SDK is there, we’re done
+    if (window.HeyGenStreamingAvatar) return;
+
+    // The LOCAL shim/data import sets the global *after* onload – wait for it
+    const needsPoll = src === LOCAL || src.startsWith('data:');
+    if (needsPoll) {
+      const started = Date.now();
+      while (!window.HeyGenStreamingAvatar && Date.now() - started < 5000) {
+        // wait up to 5s
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise(r => setTimeout(r, 100));
+      }
+    }
+  }
+
+  for (const src of sources) {
+    try {
+      await addScript(src);
+      if (window.HeyGenStreamingAvatar) {
+        return window.HeyGenStreamingAvatar;
+      }
+    } catch (e) {
+      console.warn('[heygen] SDK load failed from', src, e);
+    }
+  }
+
+  throw new Error('Failed to load HeyGen Streaming Avatar SDK from all sources.');
 }
