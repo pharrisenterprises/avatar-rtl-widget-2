@@ -1,17 +1,23 @@
-// app/lib/loadHeygenSdk.js
+// app/lib/loadHeygenSdk.ts
+declare global {
+  interface Window {
+    HeyGenStreamingAvatar?: any;
+  }
+}
+
 const SRCs = [
   'https://unpkg.com/@heygen/streaming-avatar@latest/dist/index.umd.js',
-  'https://cdn.jsdelivr.net/npm/@heygen/streaming-avatar@latest/dist/index.umd.js'
+  'https://cdn.jsdelivr.net/npm/@heygen/streaming-avatar@latest/dist/index.umd.js',
 ];
 
-export async function loadHeygenSdk() {
+export async function loadHeygenSdk(): Promise<any> {
   if (typeof window === 'undefined') return null;
   if (window.HeyGenStreamingAvatar) return window.HeyGenStreamingAvatar;
 
-  let lastErr = null;
+  let lastErr: unknown = null;
   for (const src of SRCs) {
     try {
-      await new Promise((resolve, reject) => {
+      await new Promise<void>((resolve, reject) => {
         const s = document.createElement('script');
         s.src = src;
         s.async = true;
@@ -25,8 +31,8 @@ export async function loadHeygenSdk() {
       }
     } catch (e) {
       lastErr = e;
-      console.warn('[heygen] loader error:', e.message);
+      console.warn('[heygen] loader error:', (e as Error).message);
     }
   }
-  throw lastErr || new Error('Could not load HeyGen SDK from any CDN');
+  throw (lastErr as Error) || new Error('Could not load HeyGen SDK from any CDN');
 }
