@@ -4,110 +4,62 @@ export const dynamic = 'force-dynamic';
 
 import { NextResponse } from 'next/server';
 
-/**
- * Read response body exactly once as text, then JSON.parse safely.
- * This avoids "Body is unusable: already been read" errors.
- */
-async function readJsonSafe(res: Response) {
-  const txt = await res.text(); // read ONCE
-  try {
-    return { ok: true, json: JSON.parse(txt), raw: txt };
-  } catch {
-    return { ok: false, json: null, raw: txt };
-  }
-}
-
-/**
- * Try fetching from a HeyGen URL and return normalized result.
- */
-async function fetchList(url: string, apiKey: string) {
-  const res = await fetch(url, {
-    headers: { 'X-Api-Key': apiKey },
-    cache: 'no-store',
-  });
-
-  const body = await readJsonSafe(res);
-
-  return {
-    httpOk: res.ok,
-    status: res.status,
-    body, // { ok, json, raw }
-  };
-}
+type HeygenAvatar = {
+  avatar_id: string;
+  name?: string;
+};
 
 export async function GET(req: Request) {
   const apiKey = process.env.HEYGEN_API_KEY;
+  const { searchParams } = new URL(req.url);
+  const raw = (searchParams.get('name') || '').trim();
+
   if (!apiKey) {
     return NextResponse.json({ ok: false, error: 'HEYGEN_API_KEY missing' }, { status: 500 });
   }
-
-  const { searchParams } = new URL(req.url);
-  const wanted =
-    searchParams.get('name') ||
-    process.env.NEXT_PUBLIC_HEYGEN_AVATAR_NAME ||
-    '';
-
-  if (!wanted) {
-    return NextResponse.json({ ok: false, error: 'avatar name required' }, { status: 400 });
+  if (!raw) {
+    return NextResponse.json({ ok: false, error: 'name_required' }, { status: 400 });
   }
 
   try {
-    // Try v1 first, then v2
-    let out = await fetchList('https://api.heygen.com/v1/avatar', apiKey);
+    const res = await fetch('https://api.heygen.com/v1/avatars', {
+      headers: { 'X-Api-Key': apiKey, 'Accept': 'application/json' },
+      cache: 'no-store',
+    });
 
-    if (!out.httpOk) {
-      // Some orgs only have v2
-      out = await fetchList('https://api.heygen.com/v2/avatars', apiKey);
+    const text = await res.text();
+    let data: any = null;
+    try { data = JSON.parse(text); } catch {}
+
+    if (!res.ok) {
+      return NextResponse.json({ ok: false, status: res.status, body: data ?? text }, { status: res.status });
     }
 
-    if (!out.httpOk) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: 'avatar_list_error',
-          status: out.status,
-          bodyOk: out.body.ok,
-          body: out.body.ok ? out.body.json : out.body.raw,
-        },
-        { status: out.status || 500 }
-      );
+    const items: HeygenAvatar[] = data?.data ?? data?.avatars ?? [];
+    if (!Array.isArray(items) || items.length === 0) {
+      return NextResponse.json({ ok: false, error: 'no_avatars_returned' }, { status: 404 });
     }
 
-    // Normalize list from either v1 or v2
-    const j = out.body.ok ? out.body.json : {};
-    const list =
-      j?.data?.avatars || // v2 common
-      j?.avatars ||       // alternate shape
-      j?.data ||          // some v1 responses
-      [];
+    const q = raw.toLowerCase();
 
-    const match = Array.isArray(list)
-      ? list.find((a: any) =>
-          a?.avatar_name === wanted ||
-          a?.name === wanted
-        )
-      : null;
+    // 1) exact name match (case-insensitive)
+    let match = items.find(a => (a.name || '').toLowerCase() === q);
+
+    // 2) contains match (e.g., "conrad_sitting")
+    if (!match) match = items.find(a => (a.name || '').toLowerCase().includes(q));
+
+    // 3) startsWith match (sometimes names have suffixes)
+    if (!match) match = items.find(a => (a.name || '').toLowerCase().startsWith(q));
 
     if (!match) {
       return NextResponse.json(
-        { ok: false, error: 'avatar_not_found', tried: wanted, total: Array.isArray(list) ? list.length : 0 },
+        { ok: false, error: 'avatar_not_found', tried: raw, total: items.length },
         { status: 404 }
       );
     }
 
-    const id = match?.avatar_id || match?.id || null;
-    if (!id) {
-      return NextResponse.json(
-        { ok: false, error: 'avatar_has_no_id', avatar: match },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json({ ok: true, id, name: wanted });
+    return NextResponse.json({ ok: true, id: match.avatar_id, name: match.name });
   } catch (err: any) {
-    return NextResponse.json(
-      { ok: false, error: err?.message || 'avatar_fetch_failed' },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: err?.message || 'lookup_failed' }, { status: 500 });
   }
 }
