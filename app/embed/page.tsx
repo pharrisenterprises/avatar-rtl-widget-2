@@ -1,65 +1,72 @@
 // app/embed/page.tsx
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 export default function EmbedDebug() {
-  const [log, setLog] = useState<string[]>([]);
-  const [avatar, setAvatar] = useState<string>('');
-  const [token, setToken] = useState<string>('');
-  const [status, setStatus] = useState('ready');
+  const [status, setStatus] = useState<'ready' | 'token_ok' | 'token_fail' | 'avatar_ok' | 'avatar_fail'>('ready');
+  const [tokenPrefix, setTokenPrefix] = useState<string>('—');
+  const [resolvedId, setResolvedId] = useState<string>('—');
 
-  async function fetchAvatar() {
-    setStatus('resolving avatar…');
-    try {
-      const name = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_NAME || '';
-      const r = await fetch(`/api/heygen-avatars?name=${encodeURIComponent(name)}`, { cache: 'no-store' });
-      const j = await r.json();
-      setLog(l => [`GET /api/heygen-avatars -> ${r.status}`, JSON.stringify(j), ...l]);
-      if (j?.ok && j?.id) {
-        setAvatar(j.id);
-        setStatus('avatar_ok');
-      } else {
-        setStatus('avatar_error');
-      }
-    } catch (e: any) {
-      setLog(l => [`avatar error: ${e?.message}`, ...l]);
-      setStatus('avatar_error');
-    }
-  }
+  const AVATAR_ID = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || ''; // will be empty unless you add NEXT_PUBLIC var
+  const AVATAR_NAME = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_NAME || '';
 
-  async function fetchToken() {
-    setStatus('requesting token…');
+  async function testToken() {
+    setStatus('ready');
     try {
       const r = await fetch('/api/heygen-token', { cache: 'no-store' });
       const j = await r.json();
-      setLog(l => [`GET /api/heygen-token -> ${r.status}`, JSON.stringify(j), ...l]);
-      if (j?.ok && j?.token) {
-        setToken(j.token);
+      if (r.ok && j?.ok && j?.token) {
+        setTokenPrefix(String(j.token).slice(0, 12) + '…');
         setStatus('token_ok');
       } else {
-        setStatus('token_error');
+        setStatus('token_fail');
       }
-    } catch (e: any) {
-      setLog(l => [`token error: ${e?.message}`, ...l]);
-      setStatus('token_error');
-    }
+    } catch { setStatus('token_fail'); }
   }
 
+  async function testAvatar() {
+    setStatus('ready');
+    try {
+      // prefer a configured ID if you expose it as NEXT_PUBLIC
+      if (AVATAR_ID) {
+        setResolvedId(AVATAR_ID);
+        setStatus('avatar_ok');
+        return;
+      }
+      const name = AVATAR_NAME;
+      if (!name) { setStatus('avatar_fail'); return; }
+
+      const r = await fetch(`/api/heygen-avatars?name=${encodeURIComponent(name)}`, { cache: 'no-store' });
+      const j = await r.json();
+      if (r.ok && j?.ok && j?.id) {
+        setResolvedId(j.id);
+        setStatus('avatar_ok');
+      } else {
+        setStatus('avatar_fail');
+      }
+    } catch { setStatus('avatar_fail'); }
+  }
+
+  useEffect(() => {
+    // automatically try token on load, then avatar
+    testToken().then(() => testAvatar());
+  }, []);
+
   return (
-    <div style={{background:'#000', color:'#fff', height:'100dvh', display:'flex', flexDirection:'column', gap:12, padding:16, fontFamily:'system-ui' }}>
-      <div style={{fontWeight:700}}>Embed Debug</div>
-      <div>Status: {status}</div>
-      <div style={{display:'flex', gap:8}}>
-        <button onClick={fetchAvatar} style={{padding:'8px 12px', borderRadius:8, border:0, background:'#1e90ff', color:'#fff', cursor:'pointer'}}>Test Avatar</button>
-        <button onClick={fetchToken}  style={{padding:'8px 12px', borderRadius:8, border:0, background:'#1e90ff', color:'#fff', cursor:'pointer'}}>Test Token</button>
+    <div style={{ padding: 20, color: '#fff', background: '#000', minHeight: '100vh' }}>
+      <h2>Embed Debug</h2>
+      <p>Status: {status}</p>
+
+      <div style={{ display: 'flex', gap: 12, margin: '12px 0' }}>
+        <button onClick={testAvatar} style={{ padding: '10px 16px' }}>Test Avatar</button>
+        <button onClick={testToken} style={{ padding: '10px 16px' }}>Test Token</button>
       </div>
-      <div>Resolved avatarId: <code>{avatar || '—'}</code></div>
-      <div>Token (prefix): <code>{token ? token.slice(0,12)+'…' : '—'}</code></div>
-      <div style={{marginTop:8, fontSize:13, opacity:.8}}>AVATAR_NAME: <code>{process.env.NEXT_PUBLIC_HEYGEN_AVATAR_NAME || '(not set)'}</code></div>
-      <div style={{marginTop:12, borderTop:'1px solid rgba(255,255,255,.12)', paddingTop:12, fontSize:12, whiteSpace:'pre-wrap'}}>
-        {log.join('\n')}
-      </div>
+
+      <p>Resolved avatarId: {resolvedId}</p>
+      <p>Token (prefix): {tokenPrefix}</p>
+      <hr style={{ opacity: .2, margin: '16px 0' }} />
+      <p>AVATAR_NAME: {AVATAR_NAME || '—'}</p>
     </div>
   );
 }
