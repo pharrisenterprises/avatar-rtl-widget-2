@@ -1,104 +1,148 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
+import { loadHeygenSdk } from '@/app/lib/loadHeygenSdk';
 
-// NOTE: We don’t import a HeyGen SDK here because your project already had working SDK wiring.
-// This page just fetches the token + avatarId and confirms they’re valid,
-// then exposes them to window so your existing player code can use them.
-// If your project already instantiates the HeyGen client in this page, keep it below where indicated.
+async function getJSON(path) {
+  const r = await fetch(path, { cache: 'no-store' });
+  if (!r.ok) throw new Error(`${path} -> ${r.status}`);
+  return r.json();
+}
 
 export default function AvatarDebugPage() {
-  const [status, setStatus] = useState<'idle'|'token_ok'|'token_fail'|'avatar_ok'|'avatar_fail'|'starting'|'started'|'error'>('idle');
-  const [msg, setMsg] = useState<string>('');
-  const tokenRef = useRef<string>('');
-  const avatarIdRef = useRef<string>('');
+  const [status, setStatus] = useState('idle');   // idle | token_ok | avatar_ok | starting | started | error
+  const [note, setNote]   = useState('');
+  const tokenRef   = useRef('');
+  const avatarRef  = useRef(''); // streaming avatar *id* like "Wayne_20240711"
+  const videoRef   = useRef(null);
 
-  async function getToken() {
-    setStatus('idle'); setMsg('Fetching token…');
-    const r = await fetch('/api/heygen-token', { cache: 'no-store' });
-    if (!r.ok) { setStatus('token_fail'); setMsg(`GET /api/heygen-token -> ${r.status}`); return; }
-    const j = await r.json().catch(() => ({}));
-    // IMPORTANT: our API returns { token }, not { access_token }
-    const tok = j?.token;
-    if (!tok) { setStatus('token_fail'); setMsg('Token JSON missing "token"'); return; }
-    tokenRef.current = tok;
-    setStatus('token_ok'); setMsg('Token OK');
-  }
+  // Warm up token + avatar id
+  useEffect(() => {
+    (async () => {
+      try {
+        const t = await getJSON('/api/heygen-token');
+        if (!t?.token) throw new Error('Token JSON missing "token"');
+        tokenRef.current = t.token;
+        setStatus('token_ok');
 
-  async function getAvatarId() {
-    setMsg('Resolving avatar id…');
-    // We prefer env HEYGEN_AVATAR_ID, so the API will return that
-    const r = await fetch('/api/heygen-avatars', { cache: 'no-store' });
-    if (!r.ok) { setStatus('avatar_fail'); setMsg(`GET /api/heygen-avatars -> ${r.status}`); return; }
-    const j = await r.json().catch(() => ({}));
-    const id = j?.id;
-    if (!id) { setStatus('avatar_fail'); setMsg('Avatar JSON missing "id"'); return; }
-    avatarIdRef.current = id; // e.g. "Wayne_20240711"
-    setStatus('avatar_ok'); setMsg(`Avatar OK: ${id}`);
-  }
+        const a = await getJSON('/api/heygen-avatars');
+        if (!a?.id) throw new Error('Avatar JSON missing "id"');
+        avatarRef.current = a.id;
+        setStatus('avatar_ok');
+        setNote(`Ready: ${a.id}`);
+      } catch (e) {
+        setStatus('error');
+        setNote(e.message || 'Warmup failed');
+      }
+    })();
+  }, []);
 
-  async function start() {
+  async function onStart() {
     try {
-      setStatus('starting'); setMsg('Starting avatar…');
+      setStatus('starting');
+      setNote('Loading HeyGen SDK…');
 
-      // Make sure we’ve got both pieces
-      if (!tokenRef.current) await getToken();
-      if (!avatarIdRef.current) await getAvatarId();
-      if (!tokenRef.current || !avatarIdRef.current) { setStatus('error'); setMsg('Missing token or avatarId'); return; }
+      const HG = await loadHeygenSdk();
+      if (!HG) throw new Error('HeyGen SDK not available');
 
-      // EXPOSE to window for any existing player logic you already have wired elsewhere
-      (window as any).__HEYGEN_DEBUG__ = {
-        token: tokenRef.current,
-        avatarName: avatarIdRef.current, // HeyGen streaming expects "avatarName" = Interactive Avatar ID string
-      };
+      if (!tokenRef.current) {
+        const t = await getJSON('/api/heygen-token');
+        tokenRef.current = t.token;
+      }
+      if (!avatarRef.current) {
+        const a = await getJSON('/api/heygen-avatars');
+        avatarRef.current = a.id;
+      }
 
-      // If you previously had HeyGen start code here, keep it below using "tokenRef.current" and "avatarIdRef.current".
-      // Example pseudo (keep your real SDK code):
-      //
-      // const client = new HeyGenClient({ token: tokenRef.current });
-      // await client.createStartAvatar({ avatarName: avatarIdRef.current, quality: 'high' });
-      // client.attachVideoElement(document.getElementById('video') as HTMLVideoElement);
-      //
-      // If your actual code lives elsewhere, that’s fine—this page now provides correct values.
+      const token = tokenRef.current;
+      const avatarName = avatarRef.current;
 
-      setStatus('started'); setMsg('Avatar started (values exposed on window.__HEYGEN_DEBUG__)');
-    } catch (e: any) {
-      setStatus('error'); setMsg(e?.message || 'start failed');
+      if (!token || !avatarName) throw new Error('Missing token or avatar id');
+
+      // Expose for your other pages / debugging
+      window.__HEYGEN_DEBUG__ = { token, avatarName };
+
+      // ---- Actual start sequence ----
+      // The UMD exports a constructor on window.HeyGenStreamingAvatar
+      const ClientCtor = window.HeyGenStreamingAvatar;
+      if (!ClientCtor) throw new Error('HeyGenStreamingAvatar missing on window');
+
+      // 1) create client with token (IMPORTANT: field is "token", not "access_token")
+      const client = new ClientCtor({ token });
+
+      // 2) start a session; avatarName must be the streaming id e.g. "Wayne_20240711"
+      const session = await client.createStartAvatar({
+        avatarName,
+        quality: 'high'
+      });
+
+      // 3) pipe remote stream to our <video>
+      const videoEl = videoRef.current;
+      if (!videoEl) throw new Error('Missing <video> element');
+
+      const mediaStream = await client.attachToElement(videoEl);
+      console.log('[heygen] attached stream', mediaStream);
+
+      // 4) optional: quick mouth-check
+      // await client.speakText('Hello! This is a quick streaming check.');
+
+      setStatus('started');
+      setNote('Avatar started (values on window.__HEYGEN_DEBUG__)');
+    } catch (err) {
+      console.error(err);
+      setStatus('error');
+      setNote(err?.message || 'Start failed');
     }
   }
 
-  useEffect(() => {
-    // Pre-warm token + avatarId so Start works first click
-    (async () => {
-      await getToken();
-      if (tokenRef.current) await getAvatarId();
-    })();
-  }, []);
+  async function testToken() {
+    try {
+      const t = await getJSON('/api/heygen-token');
+      tokenRef.current = t.token;
+      setStatus('token_ok');
+      setNote('Token OK');
+    } catch (e) {
+      setStatus('error');
+      setNote(e.message);
+    }
+  }
+
+  async function testAvatar() {
+    try {
+      const a = await getJSON('/api/heygen-avatars');
+      avatarRef.current = a.id;
+      setStatus('avatar_ok');
+      setNote(`Avatar OK: ${a.id}`);
+    } catch (e) {
+      setStatus('error');
+      setNote(e.message);
+    }
+  }
 
   return (
     <div style={{ padding: 20, color: '#fff', background: '#111', minHeight: '100vh', fontFamily: 'system-ui, sans-serif' }}>
       <h1>Avatar Debug (/avatar)</h1>
       <p>Status: <strong>{status}</strong></p>
-      <p>{msg}</p>
+      <p>{note}</p>
 
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
-        <button onClick={getToken} style={btn}>Test Token</button>
-        <button onClick={getAvatarId} style={btn}>Test Avatar</button>
-        <button onClick={start} style={btnPrimary}>Start</button>
+        <button onClick={testToken}  style={btn}>Test Token</button>
+        <button onClick={testAvatar} style={btn}>Test Avatar</button>
+        <button onClick={onStart}    style={btnPrimary}>Start</button>
       </div>
 
-      <div style={{ marginTop: 16, fontSize: 14, opacity: 0.8 }}>
-        <div><code>window.__HEYGEN_DEBUG__</code> will contain <code>{`{ token, avatarName }`}</code> after Start.</div>
+      <div style={{ marginTop: 12, fontSize: 13, opacity: .8 }}>
+        <code>window.__HEYGEN_DEBUG__</code> will contain {'{ token, avatarName }'} after Start.
       </div>
 
       <div style={{ marginTop: 20, position: 'relative', width: 640, maxWidth: '100%', aspectRatio: '16/9', background: '#000', borderRadius: 12, overflow: 'hidden' }}>
-        <video id="video" autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+        <video id="video" ref={videoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
       </div>
     </div>
   );
 }
 
-const btn: React.CSSProperties = {
+const btn = {
   padding: '10px 16px',
   background: '#333',
   color: '#fff',
@@ -107,7 +151,12 @@ const btn: React.CSSProperties = {
   cursor: 'pointer'
 };
 
-const btnPrimary: React.CSSProperties = {
+const btnPrimary = {
+  ...btn,
+  background: '#1e90ff',
+  border: '1px solid #1e90ff'
+};
+
   ...btn,
   background: '#1e90ff',
   border: '1px solid #1e90ff'
