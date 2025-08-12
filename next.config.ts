@@ -8,19 +8,19 @@ const nextConfig: NextConfig = {
         source: '/:path*',
         headers: [
           {
-            // Allow your widget to be embedded by these sites
             key: 'Content-Security-Policy',
+            // Allow your sites to iframe this app
             value: [
               "frame-ancestors 'self'",
               'https://*.vercel.app',
-              'https://*.wordpress.com',
-              'https://*.wpcomstaging.com',
               'https://*.godaddysites.com',
               'https://*.godaddy.com',
+              'https://*.wpcomstaging.com',
+              'https://*.wordpress.com',
               'https://*.infinitysales.ai',
+              'https://pharrisenterprises-qjmtx.wpcomstaging.com',
             ].join(' '),
           },
-          // Do NOT set X-Frame-Options anywhere (it conflicts with CSP)
         ],
       },
     ];
