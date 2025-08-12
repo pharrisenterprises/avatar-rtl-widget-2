@@ -5,33 +5,52 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from 'next/server';
 
 export async function GET() {
-  const key = process.env.HEYGEN_API_KEY;
-  if (!key) {
-    return NextResponse.json({ ok: false, error: 'HEYGEN_API_KEY missing' }, { status: 500 });
+  const apiKey = process.env.HEYGEN_API_KEY;
+  if (!apiKey) {
+    return NextResponse.json(
+      { ok: false, error: 'HEYGEN_API_KEY missing' },
+      { status: 500 }
+    );
   }
 
   try {
-    const r = await fetch('https://api.heygen.com/v1/streaming.create_token', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Api-Key': key,
-      },
-      body: JSON.stringify({}),
-      cache: 'no-store',
-    });
+    const res = await fetch(
+      'https://api.heygen.com/v1/streaming.create_token',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Api-Key': apiKey,
+        },
+        body: JSON.stringify({}),
+        cache: 'no-store',
+      }
+    );
 
-    // Try to read JSON; if that fails, read text so we never throw HTML at the browser
-    let data: any = null;
-    try { data = await r.json(); } catch { data = { raw: await r.text() }; }
+    const text = await res.text();
+    let json: any = null;
+    try { json = JSON.parse(text); } catch {}
 
-    if (!r.ok) {
-      return NextResponse.json({ ok: false, error: data?.message || 'token_error', data }, { status: r.status });
+    if (!res.ok) {
+      return NextResponse.json(
+        { ok: false, status: res.status, body: json ?? text },
+        { status: res.status }
+      );
     }
 
-    const token = data?.token ?? data?.data?.token ?? null;
+    const token = json?.data?.token ?? json?.token;
+    if (!token) {
+      return NextResponse.json(
+        { ok: false, error: 'no_token_in_response', body: json ?? text },
+        { status: 500 }
+      );
+    }
+
     return NextResponse.json({ ok: true, token });
   } catch (err: any) {
-    return NextResponse.json({ ok: false, error: err?.message || 'token_fetch_failed' }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: err?.message || 'token_fetch_failed' },
+      { status: 500 }
+    );
   }
 }
