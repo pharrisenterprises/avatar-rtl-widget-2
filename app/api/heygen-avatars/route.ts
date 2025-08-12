@@ -1,65 +1,68 @@
-// app/api/heygen-avatars/route.ts
+// app/api/heygen-avatars/route.js
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-import { NextResponse } from 'next/server';
-
-type HeygenAvatar = {
-  avatar_id: string;
-  name?: string;
-};
-
-export async function GET(req: Request) {
-  const apiKey = process.env.HEYGEN_API_KEY;
-  const { searchParams } = new URL(req.url);
-  const raw = (searchParams.get('name') || '').trim();
-
-  if (!apiKey) {
-    return NextResponse.json({ ok: false, error: 'HEYGEN_API_KEY missing' }, { status: 500 });
-  }
-  if (!raw) {
-    return NextResponse.json({ ok: false, error: 'name_required' }, { status: 400 });
-  }
-
+export async function GET(req) {
   try {
-    const res = await fetch('https://api.heygen.com/v1/avatars', {
+    const url = new URL(req.url);
+    const name = (url.searchParams.get('name') || '').trim();
+
+    // We primarily use HEYGEN_AVATAR_ID now
+    const id = process.env.HEYGEN_AVATAR_ID || '';
+    if (id) {
+      return new Response(JSON.stringify({ ok: true, id, source: 'env_id', nameHint: name }), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+
+    // Fallback: lookup by name (not recommended anymore, but kept for completeness)
+    if (!name) {
+      return new Response(JSON.stringify({ ok: false, error: 'name_required' }), {
+        status: 400, headers: { 'content-type': 'application/json' }
+      });
+    }
+
+    const apiKey = process.env.HEYGEN_API_KEY;
+    if (!apiKey) {
+      return new Response(JSON.stringify({ ok: false, error: 'HEYGEN_API_KEY missing' }), {
+        status: 500, headers: { 'content-type': 'application/json' }
+      });
+    }
+
+    const r = await fetch('https://api.heygen.com/v1/avatars', {
       headers: { 'X-Api-Key': apiKey, 'Accept': 'application/json' },
       cache: 'no-store',
     });
 
-    const text = await res.text();
-    let data: any = null;
+    const text = await r.text();
+    let data = null;
     try { data = JSON.parse(text); } catch {}
 
-    if (!res.ok) {
-      return NextResponse.json({ ok: false, status: res.status, body: data ?? text }, { status: res.status });
+    if (!r.ok) {
+      return new Response(JSON.stringify({ ok: false, status: r.status, body: data ?? text }), {
+        status: r.status, headers: { 'content-type': 'application/json' }
+      });
     }
 
-    const items: HeygenAvatar[] = data?.data ?? data?.avatars ?? [];
-    if (!Array.isArray(items) || items.length === 0) {
-      return NextResponse.json({ ok: false, error: 'no_avatars_returned' }, { status: 404 });
-    }
+    const items = data?.data || data?.avatars || [];
+    const q = name.toLowerCase();
 
-    const q = raw.toLowerCase();
-
-    // 1) exact name match (case-insensitive)
-    let match = items.find(a => (a.name || '').toLowerCase() === q);
-
-    // 2) contains match (e.g., "conrad_sitting")
-    if (!match) match = items.find(a => (a.name || '').toLowerCase().includes(q));
-
-    // 3) startsWith match (sometimes names have suffixes)
-    if (!match) match = items.find(a => (a.name || '').toLowerCase().startsWith(q));
+    let match = items.find(a => (a.avatar_id || '').toLowerCase() === q)
+             || items.find(a => (a.avatar_id || '').toLowerCase().includes(q))
+             || items.find(a => (a.avatar_id || '').toLowerCase().startsWith(q));
 
     if (!match) {
-      return NextResponse.json(
-        { ok: false, error: 'avatar_not_found', tried: raw, total: items.length },
-        { status: 404 }
-      );
+      return new Response(JSON.stringify({ ok: false, error: 'avatar_not_found', tried: name, total: items.length }), {
+        status: 404, headers: { 'content-type': 'application/json' }
+      });
     }
 
-    return NextResponse.json({ ok: true, id: match.avatar_id, name: match.name });
-  } catch (err: any) {
-    return NextResponse.json({ ok: false, error: err?.message || 'lookup_failed' }, { status: 500 });
+    return new Response(JSON.stringify({ ok: true, id: match.avatar_id, source: 'lookup' }), {
+      headers: { 'content-type': 'application/json' },
+    });
+  } catch (err) {
+    return new Response(JSON.stringify({ ok: false, error: err?.message || 'lookup_failed' }), {
+      status: 500, headers: { 'content-type': 'application/json' }
+    });
   }
 }
