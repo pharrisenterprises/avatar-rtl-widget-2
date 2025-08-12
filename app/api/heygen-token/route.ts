@@ -2,10 +2,32 @@
 import { NextResponse } from 'next/server';
 
 export async function GET() {
-  const apiKey = process.env.HEYGEN_API_KEY;
-  if (!apiKey) {
-    return NextResponse.json({ ok: false, error: 'Missing HEYGEN_API_KEY' }, { status: 500 });
+  const key = process.env.HEYGEN_API_KEY;
+  if (!key) {
+    return NextResponse.json({ ok: false, error: 'HEYGEN_API_KEY missing' }, { status: 500 });
   }
-  // Health-style visibility only
-  return NextResponse.json({ ok: true, keyPresent: apiKey.slice(0, 6) + '…' });
+
+  try {
+    // HeyGen Streaming token endpoint
+    const r = await fetch('https://api.heygen.com/v1/streaming.create_token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Api-Key': key,
+      },
+      body: JSON.stringify({}),
+      // avoid Next caching
+      cache: 'no-store',
+    });
+
+    const data = await r.json();
+    if (!r.ok) {
+      return NextResponse.json({ ok: false, error: data?.message || 'token_error', raw: data }, { status: r.status });
+    }
+
+    // Expected shape: { token: "..." }
+    return NextResponse.json({ ok: true, token: data?.token ?? data?.data?.token ?? null });
+  } catch (err: any) {
+    return NextResponse.json({ ok: false, error: err?.message || 'token_fetch_failed' }, { status: 500 });
+  }
 }
