@@ -1,5 +1,4 @@
 export const dynamic = 'force-dynamic';
-
 export async function GET() {
   const code = `
   (async () => {
@@ -11,7 +10,5 @@ export async function GET() {
       console.error('[heygen api-shim] import failed', e);
     }
   })();`;
-  return new Response(code, {
-    headers: { 'content-type': 'application/javascript; charset=utf-8' }
-  });
+  return new Response(code, { headers: { 'content-type': 'application/javascript; charset=utf-8' }});
 }
