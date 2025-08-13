@@ -12,7 +12,7 @@ async function createToken() {
       'Authorization': `Bearer ${key}`,
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({}) // (optionally) { expires_in: 3600 }
+    body: JSON.stringify({})
   });
 
   if (!r.ok) {
