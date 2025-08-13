@@ -7,7 +7,7 @@ export default function ChatFab() {
 
   return (
     <>
-      {/* FAB */}
+      {/* Floating Chat Button */}
       <button onClick={()=>setOpen(true)} style={fab}>
         <span style={{fontWeight:700}}>Chat</span>
       </button>
@@ -30,10 +30,12 @@ const fab = {
   borderRadius: 999, padding:'12px 18px', boxShadow:'0 10px 24px rgba(30,144,255,.35)',
   cursor:'pointer'
 };
+
 const backdrop = {
   position:'fixed', inset:0, background:'rgba(0,0,0,.45)', zIndex:40,
   display:'grid', placeItems:'end', padding:16
 };
+
 const sheet = {
   width: 440, maxWidth:'min(92vw, 520px)'
 };
