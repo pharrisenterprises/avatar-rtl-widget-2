@@ -12,19 +12,24 @@ export default function AvatarDebug() {
       setStatus('loading-sdk'); setNote('Loading HeyGen SDK…');
       const HeyGenStreamingAvatar = await loadHeygenSdk();
 
-      const tokRes = await fetch('/api/heygen-token', { cache: 'no-store' });
+      // Get session token (server gives us /v1/streaming.create_token result)
+      const tokRes = await fetch('/api/heygen-token', { method: 'POST', cache: 'no-store' });
       const { token } = await tokRes.json();
-      if (!token) throw new Error('Token missing from /api/heygen-token');
+      if (!token) throw new Error('Session token missing from /api/heygen-token');
 
+      // Resolve streaming avatar ID
       const avRes = await fetch('/api/heygen-avatars', { cache: 'no-store' });
       const { id: avatarName } = await avRes.json();
       if (!avatarName) throw new Error('Avatar id missing from /api/heygen-avatars');
 
       window.__HEYGEN_DEBUG__ = { token, avatarName };
-      setStatus('starting'); setNote(`Starting avatar ${avatarName}…`);
 
-      const client = new HeyGenStreamingAvatar({ token });
-      await client.createStartAvatar({ avatarName, quality: 'high' });
+      setStatus('starting'); setNote(`Starting ${avatarName}…`);
+
+      const client = new HeyGenStreamingAvatar({ token });  // use the *session token*
+      // Some SDK builds accept a version field; harmless if ignored.
+      await client.createStartAvatar({ avatarName, quality: 'high', version: 'v3' });
+
       if (!videoRef.current) throw new Error('Missing <video> element');
       await client.attachToElement(videoRef.current);
 
