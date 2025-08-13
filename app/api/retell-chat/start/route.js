@@ -1,26 +1,30 @@
-// app/api/retell-chat/start/route.js
-export async function POST() {
-  const apiKey = process.env.RETELL_API_KEY;
-  const agentId = process.env.RETELL_AGENT_ID;
-  if (!apiKey || !agentId) {
-    return new Response(JSON.stringify({ ok: false, error: 'Missing RETELL_API_KEY or RETELL_AGENT_ID' }), { status: 500 });
-  }
+export const dynamic = 'force-dynamic';
 
+export async function GET() {
   try {
-    const r = await fetch('https://api.retellai.com/v2/chat/start', {
+    const apiKey = process.env.RETELL_API_KEY || '';
+    const agentId = process.env.RETELL_CHAT_AGENT_ID || process.env.RETELL_AGENT_ID || '';
+    if (!apiKey || !agentId) {
+      return Response.json({ ok: false, error: 'Missing RETELL_API_KEY or RETELL_CHAT_AGENT_ID' }, { status: 500 });
+    }
+
+    // Start a chat session for this agent
+    const r = await fetch(`https://api.retellai.com/v2/chat/start?agent_id=${encodeURIComponent(agentId)}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-      body: JSON.stringify({ agent_id: agentId })
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({}),
     });
 
-    const j = await r.json();
-    // Normalize field names:
-    const chatId = j.chatId || j.chat_id || j.id || j.session_id || null;
-    return new Response(JSON.stringify({ ok: r.ok, chatId, raw: j }), { status: r.ok ? 200 : 400 });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return Response.json({ ok: false, status: r.status, body: j }, { status: r.status });
+
+    // normalize a couple of common shapes
+    const chatId = j?.chat_id || j?.id || j?.data?.chat_id || j?.data?.id || null;
+    return Response.json({ ok: true, raw: j, chatId });
   } catch (e) {
-    return new Response(JSON.stringify({ ok: false, error: e?.message || 'retell start failed' }), { status: 500 });
+    return Response.json({ ok: false, error: e?.message || 'start failed' }, { status: 500 });
   }
 }
-
-// Convenience: GET does the same as POST so you can test in a tab
-export const GET = POST;
