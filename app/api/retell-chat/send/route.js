@@ -1,32 +1,44 @@
-// app/api/retell-chat/send/route.js
-export async function POST(req) {
-  const apiKey = process.env.RETELL_API_KEY;
-  if (!apiKey) {
-    return new Response(JSON.stringify({ ok: false, error: 'Missing RETELL_API_KEY' }), { status: 500 });
-  }
+export const dynamic = 'force-dynamic';
 
+export async function POST(req) {
   try {
-    const { chatId, text } = await req.json().catch(() => ({}));
+    const apiKey = process.env.RETELL_API_KEY || '';
+    if (!apiKey) return Response.json({ ok: false, error: 'Missing RETELL_API_KEY' }, { status: 500 });
+
+    const body = await req.json().catch(() => ({}));
+    const chatId = body?.chatId || body?.id;
+    const text = (body?.text || '').trim();
+
     if (!chatId || !text) {
-      return new Response(JSON.stringify({ ok: false, error: 'chatId and text are required' }), { status: 400 });
+      return Response.json({ ok: false, error: 'Missing chatId or text' }, { status: 400 });
     }
 
-    const r = await fetch('https://api.retellai.com/v2/chat/send_message', {
+    // Send a user message
+    const r = await fetch(`https://api.retellai.com/v2/chat/${encodeURIComponent(chatId)}/message`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-      body: JSON.stringify({ chat_id: chatId, text })
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ role: 'user', content: text }),
     });
 
-    const j = await r.json();
-    // Normalize the reply field
-    const reply =
-      j.reply ||
-      j.message ||
-      (Array.isArray(j.messages) ? (j.messages[0]?.text || j.messages[0]?.content || null) : null) ||
-      j.content || null;
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return Response.json({ ok: false, status: r.status, body: j }, { status: r.status });
 
-    return new Response(JSON.stringify({ ok: r.ok, reply, raw: j }), { status: r.ok ? 200 : 400 });
+    // normalize: find assistant reply text
+    let reply = '';
+    if (j?.messages) {
+      const last = [...j.messages].reverse().find(m => (m.role === 'assistant' || m.role === 'model'));
+      reply = last?.text || last?.content || '';
+    } else if (j?.message) {
+      reply = j.message?.text || j.message?.content || '';
+    } else if (j?.text) {
+      reply = j.text;
+    }
+
+    return Response.json({ ok: true, raw: j, reply });
   } catch (e) {
-    return new Response(JSON.stringify({ ok: false, error: e?.message || 'retell send failed' }), { status: 500 });
+    return Response.json({ ok: false, error: e?.message || 'send failed' }, { status: 500 });
   }
 }
