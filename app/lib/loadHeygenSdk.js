@@ -2,7 +2,7 @@ export async function loadHeygenSdk() {
   if (typeof window === 'undefined') throw new Error('SDK must load in the browser');
   if (window.HeyGenStreamingAvatar) return window.HeyGenStreamingAvatar;
 
-  // Prefer a direct ESM import (fast, reliable)
+  // Prefer ESM import
   try {
     const m = await import('https://esm.sh/@heygen/streaming-avatar@2.0.16?bundle&target=es2017&global-name=HeyGenStreamingAvatar');
     window.HeyGenStreamingAvatar = m.default || m;
@@ -28,10 +28,9 @@ export async function loadHeygenSdk() {
         document.head.appendChild(s);
       });
       if (window.HeyGenStreamingAvatar) return window.HeyGenStreamingAvatar;
-      // local shims set the global after load → short poll
+
       const t0 = Date.now();
       while (!window.HeyGenStreamingAvatar && Date.now() - t0 < 5000) {
-        // eslint-disable-next-line no-await-in-loop
         await new Promise(r => setTimeout(r, 100));
       }
       if (window.HeyGenStreamingAvatar) return window.HeyGenStreamingAvatar;
