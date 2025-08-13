@@ -13,22 +13,23 @@ export default function AvatarPage() {
       setStatus('loading-sdk'); setNote('Loading HeyGen SDK…');
       const HeyGenStreamingAvatar = await loadHeygenSdk();
 
-      // 1) session token
+      // 1) session token (NOT api key)
       const tokRes = await fetch('/api/heygen-token', { cache: 'no-store' });
       const tokJson = await tokRes.json();
       const token = tokJson?.token;
       if (!token) throw new Error('Token missing from /api/heygen-token');
 
-      // 2) avatar id (streaming id string like "Wayne_20240711")
+      // 2) streaming avatar id (e.g., "Wayne_20240711")
       const avRes = await fetch('/api/heygen-avatars', { cache: 'no-store' });
       const avJson = await avRes.json();
       const avatarName = avJson?.id;
       if (!avatarName) throw new Error('Avatar id missing from /api/heygen-avatars');
 
+      // make visible for quick checks
       window.__HEYGEN_DEBUG__ = { token, avatarName };
 
       setStatus('starting'); setNote(`Starting ${avatarName}…`);
-      const client = new HeyGenStreamingAvatar({ token });         // session token
+      const client = new HeyGenStreamingAvatar({ token }); // session token
       const session = await client.createStartAvatar({
         avatarName,
         quality: 'high',
@@ -38,7 +39,7 @@ export default function AvatarPage() {
       const videoEl = videoRef.current;
       if (!videoEl) throw new Error('Missing <video>');
 
-      // attach API varies by SDK build → try all, then manual
+      // attach API differences across builds → try them in order
       if (typeof session?.attachToElement === 'function') {
         await session.attachToElement(videoEl);
       } else if (typeof client?.attachToElement === 'function') {
