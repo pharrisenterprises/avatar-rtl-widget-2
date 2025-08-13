@@ -118,3 +118,8 @@ const btn = {
   color: '#fff',
   cursor: 'pointer'
 };
+
+  border: '1px solid #1e90ff',
+  color: '#fff',
+  cursor: 'pointer'
+};
