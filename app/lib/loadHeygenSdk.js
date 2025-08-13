@@ -1,55 +1,47 @@
-// app/lib/loadHeygenSdk.js
-// Robust loader that returns the *constructor/class* no matter how the UMD/ESM exposes it.
-
+// Resilient loader. Tries UMD (jsDelivr/unpkg) then falls back to ESM shim (esm.sh).
 export async function loadHeygenSdk() {
-  // already present?
-  if (globalThis.HeyGenStreamingAvatar) return normalizeCtor(globalThis.HeyGenStreamingAvatar);
+  if (typeof window !== 'undefined' && window.HeyGenStreamingAvatar) {
+    return window.HeyGenStreamingAvatar;
+  }
 
-  // try local shim first (sets window.HeyGenStreamingAvatar from esm.sh)
-  await injectScript('/heygen.umd.js').catch(() => {});
+  const tryScript = (src) =>
+    new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = src + (src.includes('?') ? '&' : '?') + 'v=' + Date.now();
+      s.async = true;
+      s.onload = () => window.HeyGenStreamingAvatar ? res(window.HeyGenStreamingAvatar) : rej(new Error('loaded but no global'));
+      s.onerror = () => rej(new Error('script failed: ' + src));
+      document.head.appendChild(s);
+    });
 
-  // CDN fallbacks (ignore error messages in console; we just continue)
-  const cdns = [
+  const sources = [
     'https://cdn.jsdelivr.net/npm/@heygen/streaming-avatar@2.0.16/dist/index.umd.js',
     'https://unpkg.com/@heygen/streaming-avatar@2.0.16/dist/index.umd.js',
+    '/heygen.umd.js',       // your local shim in /public
   ];
-  for (const src of cdns) {
-    if (globalThis.HeyGenStreamingAvatar) break;
-    try { await injectScript(src); } catch { /* continue */ }
+
+  // UMD attempts
+  for (const src of sources) {
+    try {
+      // eslint-disable-next-line no-console
+      console.log('[heygen loader] try:', src);
+      return await tryScript(src);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn('[heygen loader] failed:', src, e.message || e);
+    }
   }
 
-  // last resort: give the page a moment to settle
-  const t0 = Date.now();
-  while (!globalThis.HeyGenStreamingAvatar && Date.now() - t0 < 1500) {
-    await new Promise(r => setTimeout(r, 50));
-  }
-
-  if (!globalThis.HeyGenStreamingAvatar) {
+  // ESM fallback: import and hoist to a global
+  try {
+    const m = await import('https://esm.sh/@heygen/streaming-avatar@2.0.16?bundle&target=es2017');
+    window.HeyGenStreamingAvatar = m.default || m;
+    // eslint-disable-next-line no-console
+    console.log('[heygen loader] ESM shim ready');
+    return window.HeyGenStreamingAvatar;
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error('[heygen loader] total failure', e);
     throw new Error('Failed to load HeyGen Streaming Avatar SDK from all sources.');
   }
-  return normalizeCtor(globalThis.HeyGenStreamingAvatar);
-}
-
-function injectScript(src) {
-  return new Promise((res, rej) => {
-    const s = document.createElement('script');
-    s.src = src + (src.startsWith('/') ? `?v=${Date.now()}` : '');
-    s.onload = () => res();
-    s.onerror = () => rej(new Error(`script failed: ${src}`));
-    document.head.appendChild(s);
-  });
-}
-
-// Some builds put the class on default, some as a named export, some directly as the global.
-function normalizeCtor(mod) {
-  const ctor =
-    mod?.StreamingAvatar ||
-    mod?.default?.StreamingAvatar ||
-    mod?.default ||
-    mod;
-
-  console.log('[DBG] HeyGen global keys:', Object.keys(mod || {}));
-  console.log('[DBG] Selected ctor type:', typeof ctor);
-
-  return ctor;
 }
