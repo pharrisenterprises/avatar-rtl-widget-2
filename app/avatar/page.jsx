@@ -12,12 +12,11 @@ export default function AvatarDebug() {
       setStatus('loading-sdk'); setNote('Loading HeyGen SDK…');
       const HeyGenStreamingAvatar = await loadHeygenSdk();
 
-      // Get session token (server gives us /v1/streaming.create_token result)
-      const tokRes = await fetch('/api/heygen-token', { method: 'POST', cache: 'no-store' });
+      // GET instead of POST (your route supports both now)
+      const tokRes = await fetch('/api/heygen-token', { cache: 'no-store' });
       const { token } = await tokRes.json();
       if (!token) throw new Error('Session token missing from /api/heygen-token');
 
-      // Resolve streaming avatar ID
       const avRes = await fetch('/api/heygen-avatars', { cache: 'no-store' });
       const { id: avatarName } = await avRes.json();
       if (!avatarName) throw new Error('Avatar id missing from /api/heygen-avatars');
@@ -25,9 +24,7 @@ export default function AvatarDebug() {
       window.__HEYGEN_DEBUG__ = { token, avatarName };
 
       setStatus('starting'); setNote(`Starting ${avatarName}…`);
-
-      const client = new HeyGenStreamingAvatar({ token });  // use the *session token*
-      // Some SDK builds accept a version field; harmless if ignored.
+      const client  = new HeyGenStreamingAvatar({ token });      // ← session token
       await client.createStartAvatar({ avatarName, quality: 'high', version: 'v3' });
 
       if (!videoRef.current) throw new Error('Missing <video> element');
@@ -50,15 +47,12 @@ export default function AvatarDebug() {
       <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
         <button onClick={start} style={btnPrimary}>Start</button>
       </div>
-      <div style={{ marginTop: 16, fontSize: 14, opacity: 0.8 }}>
-        After Start, <code>window.__HEYGEN_DEBUG__</code> will contain <code>{`{ token, avatarName }`}</code>.
-      </div>
-      <div style={{ marginTop: 20, position: 'relative', width: 640, maxWidth: '100%', aspectRatio: '16/9', background: '#000', borderRadius: 12, overflow: 'hidden' }}>
+      <div style={{ marginTop: 20, position: 'relative', width: 640, maxWidth: '100%', aspectRatio: '16/9', background: '#000', borderRadius: 12 }}>
         <video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
       </div>
     </div>
   );
 }
 
-const btnBase = { padding: '10px 16px', borderRadius: 8, cursor: 'pointer', border: '1px solid transparent' };
+const btnBase    = { padding: '10px 16px', borderRadius: 8, cursor: 'pointer', border: '1px solid transparent' };
 const btnPrimary = { ...btnBase, background: '#1e90ff', borderColor: '#1e90ff', color: '#fff' };
