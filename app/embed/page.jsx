@@ -2,457 +2,230 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 
-// Loader you already have in app/lib
+// use the loader you already have
 import { loadHeygenSdk } from '../lib/loadHeygenSdk';
 
-function Icon({ name }) {
-  // tiny emoji icons so we don’t add libs
-  const map = {
-    mute: '🔇',
-    sound: '🔊',
-    mic: '🎤',
-    micOff: '🎙️❌',
-    stop: '⏹️',
-    close: '✖️',
-    send: '📤',
-  };
-  return <span style={{ marginRight: 6 }}>{map[name] || '•'}</span>;
-}
+function cx(...c){ return c.filter(Boolean).join(' '); }
 
 export default function Embed() {
-  // ---------- basic session state ----------
-  const [status, setStatus] = useState('idle'); // idle | loading-sdk | starting | started | ended | error
+  // UI state
+  const [status, setStatus] = useState('idle'); // idle | loading-sdk | starting | started | error | ended
   const [note, setNote] = useState('');
-  const [muted, setMuted] = useState(true);      // start muted
-  const [micEnabled, setMicEnabled] = useState(false); // start with mic OFF
-  const [autoStart, setAutoStart] = useState(false);
 
-  // ---------- chat + captions ----------
-  const [messages, setMessages] = useState([
-    { role: 'system', text: 'You can type a message below or turn on the mic.' }
-  ]);
-  const [input, setInput] = useState('');
-  const [captions, setCaptions] = useState(''); // running transcription, if the SDK exposes it
-
-  // ---------- refs ----------
+  // heygen
   const videoRef = useRef(null);
   const clientRef = useRef(null);
-  const avatarNameRef = useRef('');
+  const sessionRef = useRef(null);
 
-  // ---------- helpers ----------
-  function pushMsg(role, text) {
-    setMessages(prev => [...prev, { role, text }]);
+  // chat
+  const [chatInput, setChatInput] = useState('');
+  const [messages, setMessages] = useState([
+    { role: 'system', text: 'Type a message below — or turn on the mic.' }
+  ]);
+  const [sending, setSending] = useState(false);
+
+  const autostart = useMemo(() => {
+    const sp = new URLSearchParams(typeof window !== 'undefined' ? window.location.search : '');
+    return sp.get('autostart') === '1';
+  }, []);
+
+  // ---- helpers
+  function push(role, text) {
+    setMessages(m => [...m, { role, text }]);
   }
 
-  async function getToken() {
-    const r = await fetch('/api/heygen-token', { cache: 'no-store' });
-    if (!r.ok) throw new Error(`GET /api/heygen-token failed: ${r.status}`);
-    const j = await r.json();
-    const token = j?.token;
-    if (!token) throw new Error('Token missing from /api/heygen-token');
-    return token;
+  async function fetchJson(path, init) {
+    const r = await fetch(path, { cache: 'no-store', ...init });
+    if (!r.ok) throw new Error(`${init?.method || 'GET'} ${path} failed: ${r.status}`);
+    const j = await r.json().catch(() => ({}));
+    return j;
   }
 
-  async function getAvatarName() {
-    const r = await fetch('/api/heygen-avatars', { cache: 'no-store' });
-    if (!r.ok) throw new Error(`GET /api/heygen-avatars failed: ${r.status}`);
-    const j = await r.json();
-    const id = j?.id;
-    if (!id) throw new Error('Avatar id missing from /api/heygen-avatars');
-    return id; // e.g. "Wayne_20240711"
-  }
-
-  // ---------- START avatar ----------
+  // ---- start/stop
   async function startAvatar() {
     try {
-      setStatus('loading-sdk');
-      setNote('Loading HeyGen SDK…');
-      const HeyGenStreamingAvatar = await loadHeygenSdk(); // our loader with fallbacks
+      setStatus('loading-sdk'); setNote('Loading HeyGen SDK…');
+      const HeyGenStreamingAvatar = await loadHeygenSdk();
 
-      setStatus('starting');
-      setNote('Fetching token & avatar…');
-      const [token, avatarName] = await Promise.all([getToken(), getAvatarName()]);
-      avatarNameRef.current = avatarName;
+      setStatus('starting'); setNote('Fetching credentials…');
+      const { token }  = await fetchJson('/api/heygen-token');
+      const { id: avatarName } = await fetchJson('/api/heygen-avatars');
 
-      // expose for quick debug
+      // expose for quick inspect
       window.__HEYGEN_DEBUG__ = { token, avatarName };
 
-      // 1) create client (use "token", not "access_token")
-      const client = new HeyGenStreamingAvatar({ token });
+      setNote(`Starting ${avatarName}…`);
+      const client = new HeyGenStreamingAvatar({ token });       // session token (NOT API key)
       clientRef.current = client;
 
-      // 2) start avatar (v3+)
+      // v3 or higher per HeyGen guidance
       const session = await client.createStartAvatar({
-        avatarName,  // e.g. "Wayne_20240711"
+        avatarName,
         quality: 'high',
         version: 'v3'
       });
+      sessionRef.current = session;
 
-      // 3) ATTACH — supports either attachToElement or raw MediaStream
-      const maybeAttach = client.attachToElement || session.attachToElement;
-      const maybeStream = client.mediaStream || session.mediaStream;
-
-      if (maybeAttach && videoRef.current) {
-        await maybeAttach.call(client, videoRef.current);
-      } else if (maybeStream && videoRef.current) {
-        videoRef.current.srcObject = maybeStream;
-        await videoRef.current.play().catch(() => {});
-      } else {
-        throw new Error('No attach function or MediaStream available');
+      if (!videoRef.current) throw new Error('Missing <video>');
+      if (typeof client.attachToElement !== 'function') {
+        throw new Error('attachToElement() missing on client');
       }
 
-      // 4) initial mute state
-      if (videoRef.current) videoRef.current.muted = true; // start muted
-      setMuted(true);
+      // pipe the remote stream to the video element
+      await client.attachToElement(videoRef.current);
 
-      // 5) optional: wire caption/transcript if the SDK exposes events
-      try {
-        const onAny = client.on?.bind(client) || session.on?.bind(session);
-        if (onAny) {
-          onAny('transcript', (t) => {
-            if (typeof t === 'string') setCaptions(t);
-            else if (t?.text) setCaptions(t.text);
-          });
-          onAny('message', (m) => {
-            // generic “assistant said something” hook, if present
-            if (typeof m === 'string') pushMsg('assistant', m);
-            else if (m?.text) pushMsg('assistant', m.text);
-          });
-        }
-      } catch { /* no-op */ }
-
-      setStatus('started');
-      setNote('Streaming');
-
-      // optional hello (text only)
-      // if (client.speakText) await client.speakText("Hello! How can I help?");
+      setStatus('started'); setNote('Streaming');
     } catch (err) {
       console.error(err);
-      setStatus('error');
-      setNote(err?.message || 'Start failed');
-      alert(err?.message || 'Start failed');
+      setStatus('error'); setNote(err?.message || 'start failed');
+      push('system', `Error: ${err?.message || 'start failed'}`);
     }
   }
 
-  // ---------- controls ----------
-  function toggleMute() {
-    setMuted(v => {
-      const next = !v;
-      if (videoRef.current) videoRef.current.muted = next;
-      return next;
-    });
-  }
-
-  async function toggleMic() {
-    const next = !micEnabled;
-
-    if (next) {
-      // turning mic ON → ensure we got permission at least once
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        // don’t keep a page-level stream open; let SDK own it if it wants
-        stream.getTracks().forEach(t => t.stop());
-      } catch (e) {
-        alert('Microphone permission denied.');
-        return;
-      }
-    }
-
-    setMicEnabled(next);
-
-    const client = clientRef.current;
-    if (!client) return;
-
-    // Try SDK helpers if they exist
+  async function endAvatar() {
     try {
-      if (!next && client.disableMic) return client.disableMic();
-      if (next && client.enableMic) return client.enableMic();
-    } catch {}
-
-    // Fallback: toggle any local audio tracks the SDK exposes
-    try {
-      const tracks = await client.getLocalAudioTracks?.();
-      if (Array.isArray(tracks) && tracks.length) {
-        tracks.forEach(t => (t.enabled = next));
-      }
-    } catch {}
-  }
-
-  async function endSession() {
-    try {
-      const client = clientRef.current;
-      if (client?.stop) await client.stop();
+      if (clientRef.current?.stop) await clientRef.current.stop();
     } catch {}
     clientRef.current = null;
-    setStatus('ended');
-    setNote('Ended');
-    setCaptions('');
+    sessionRef.current = null;
+    setStatus('ended'); setNote('Ended');
   }
 
-  // ---------- text chat ----------
-  async function sendText() {
-    const text = input.trim();
+  // ---- mic / mute (UI only; mic capture not yet bridged to agent)
+  const [muted, setMuted] = useState(false);
+  function toggleMute() {
+    const v = videoRef.current;
+    if (!v) return;
+    v.muted = !v.muted;
+    setMuted(v.muted);
+  }
+
+  // ---- text chat → backend → speak with avatar
+  async function onSend(e) {
+    e?.preventDefault?.();
+    const text = chatInput.trim();
     if (!text) return;
-    setInput('');
-    pushMsg('user', text);
+    setChatInput('');
+    push('user', text);
 
-    const client = clientRef.current;
-    if (!client) {
-      pushMsg('system', 'Avatar is not started yet.');
-      return;
-    }
+    try {
+      setSending(true);
+      // Call your existing backend route. It should return { reply: "..." }.
+      const res = await fetchJson('/api/retell-chat/send', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text })
+      });
 
-    // Prefer the SDK’s TTS → mouth sync
-    if (client.speakText) {
-      try {
-        await client.speakText(text);
-        // Some SDKs also emit “message” events; if not, still show it
-        pushMsg('assistant', `(speaking) ${text}`);
-      } catch (e) {
-        console.error(e);
-        pushMsg('system', 'Failed to send text to avatar.');
+      const reply = res?.reply || '(No reply from agent)';
+      push('agent', reply);
+
+      // Speak it with the active HeyGen session
+      const client = clientRef.current;
+      if (client && typeof client.speakText === 'function') {
+        await client.speakText(reply);
       }
-      return;
+    } catch (err) {
+      console.error(err);
+      push('system', `Agent error: ${err?.message || err}`);
+    } finally {
+      setSending(false);
     }
-
-    // Fallback: show message only
-    pushMsg('assistant', text);
   }
 
-  // ---------- autostart ----------
-  useEffect(() => {
-    const url = new URL(window.location.href);
-    const auto = url.searchParams.get('autostart') === '1';
-    setAutoStart(auto);
-  }, []);
-  useEffect(() => { if (autoStart) startAvatar(); }, [autoStart]);
-
-  // ---------- layout ----------
-  const badge = useMemo(() => {
-    const map = {
-      idle: 'idle',
-      'loading-sdk': 'Loading SDK…',
-      starting: `Starting ${avatarNameRef.current || 'avatar'}…`,
-      started: 'Streaming',
-      ended: 'Ended',
-      error: 'Error',
-    };
-    return map[status] || status;
-  }, [status]);
+  // ---- autostart
+  useEffect(() => { if (autostart) startAvatar(); }, [autostart]);
 
   return (
-    <div style={styles.page}>
-      <div style={styles.wrap}>
-        <div style={styles.badge}><strong>{status}</strong>{status === 'started' ? ' — Streaming' : ''}</div>
+    <div style={page}>
+      <div style={card}>
+        {/* status pill */}
+        <div style={pill}>
+          <span>{status}</span>
+          {status === 'started' && <span style={{opacity:.7}}> — Streaming</span>}
+        </div>
 
-        <div style={styles.videoShell}>
+        {/* video */}
+        <div style={videoWrap}>
           <video
             ref={videoRef}
             autoPlay
             playsInline
             muted={muted}
-            style={styles.video}
+            style={video}
           />
-          {/* Overlay controls */}
-          <div style={styles.overlay}>
-            {status !== 'started' ? (
-              <button style={styles.cta} onClick={startAvatar}>Start</button>
-            ) : (
-              <div style={styles.controlsRow}>
-                <button onClick={toggleMute} style={styles.btn}>
-                  <Icon name={muted ? 'mute' : 'sound'} />
-                  {muted ? 'Muted' : 'Sound On'}
-                </button>
-
-                <button onClick={toggleMic} style={styles.btn}>
-                  <Icon name={micEnabled ? 'mic' : 'micOff'} />
-                  {micEnabled ? 'Mic On' : 'Mic Off'}
-                </button>
-
-                <button onClick={endSession} style={styles.btn}>
-                  <Icon name="stop" />
-                  End
-                </button>
-
-                <button onClick={() => window.parent?.postMessage({ type: 'close-embed' }, '*')} style={styles.btn}>
-                  <Icon name="close" />
-                  Close
-                </button>
-              </div>
-            )}
-
-            {/* Captions strip (if SDK emits) */}
-            {captions ? (
-              <div style={styles.captions}>{captions}</div>
-            ) : null}
-          </div>
         </div>
 
-        {/* Text chat panel */}
-        <div style={styles.chatCard}>
-          <div style={styles.chatHeader}>
-            <div>Text Chat</div>
-            <div style={{ opacity: 0.7, fontSize: 12 }}>{badge}</div>
+        {/* controls */}
+        <div style={controls}>
+          <button onClick={toggleMute} style={chip}>{muted ? 'Unmute' : 'Mute'}</button>
+          {/* placeholder for true mic capture; off for now */}
+          <button disabled style={chip}>Mic Off</button>
+          {status !== 'started' && (
+            <button onClick={startAvatar} style={chipPrimary}>Start</button>
+          )}
+          {status === 'started' && (
+            <button onClick={endAvatar} style={chipDanger}>End</button>
+          )}
+          <a href="#" onClick={() => window.close?.()} style={chip}>Close</a>
+        </div>
+
+        {/* text chat */}
+        <div style={chatWrap}>
+          <div style={chatHeader}>
+            <strong>Text Chat</strong>
+            <span style={{opacity:.7}}>{status === 'started' ? 'Streaming' : note}</span>
           </div>
-          <div style={styles.chatScroll} id="chat-scroll">
+          <div style={chatBody} id="chat-scroll">
             {messages.map((m, i) => (
-              <div key={i} style={{ ...styles.msg, ...(m.role === 'user' ? styles.msgUser : m.role === 'assistant' ? styles.msgAssistant : styles.msgSystem)}}>
-                <b style={{ marginRight: 8 }}>
-                  {m.role === 'user' ? 'You' : m.role === 'assistant' ? 'Avatar' : 'System'}
-                </b>
-                <span>{m.text}</span>
+              <div key={i} style={msgRow}>
+                <div style={cx(
+                  'bubble',
+                ) && (m.role === 'user' ? bubbleUser : m.role === 'agent' ? bubbleAgent : bubbleSystem)}>
+                  <span style={{opacity:.65, fontSize:12, marginRight:6}}>
+                    {m.role === 'user' ? 'You' : m.role === 'agent' ? 'Agent' : 'System'}
+                  </span>
+                  <span>{m.text}</span>
+                </div>
               </div>
             ))}
           </div>
-          <div style={styles.chatInputRow}>
+          <form onSubmit={onSend} style={chatForm}>
             <input
-              value={input}
-              onChange={e => setInput(e.target.value)}
+              value={chatInput}
+              onChange={e => setChatInput(e.target.value)}
               placeholder="Type a message…"
-              style={styles.input}
-              onKeyDown={e => { if (e.key === 'Enter') sendText(); }}
+              style={input}
             />
-            <button onClick={sendText} style={styles.sendBtn}><Icon name="send" />Send</button>
-          </div>
+            <button type="submit" style={sendBtn} disabled={sending || !clientRef.current}>
+              {sending ? '…' : 'Send'}
+            </button>
+          </form>
         </div>
-
-        {/* status note */}
-        <div style={styles.note}>{note}</div>
       </div>
     </div>
   );
 }
 
-// ---------- styles ----------
-const styles = {
-  page: {
-    background: '#0b0b0b',
-    color: '#fff',
-    minHeight: '100vh',
-    fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif',
-    display: 'grid',
-    placeItems: 'center',
-    padding: 16
-  },
-  wrap: { width: 'min(960px, 95vw)' },
-  badge: {
-    position: 'relative',
-    top: 8,
-    left: 8,
-    display: 'inline-block',
-    padding: '6px 10px',
-    background: '#1f1f1f',
-    border: '1px solid #333',
-    borderRadius: 8,
-    fontSize: 12,
-    marginBottom: 8
-  },
-  videoShell: {
-    position: 'relative',
-    width: '100%',
-    aspectRatio: '3/4',
-    background: '#000',
-    borderRadius: 16,
-    overflow: 'hidden',
-    boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
-  },
-  video: { width: '100%', height: '100%', objectFit: 'cover' },
-  overlay: {
-    position: 'absolute',
-    inset: 0,
-    display: 'flex',
-    flexDirection: 'column',
-    justifyContent: 'flex-end',
-    padding: 16,
-    pointerEvents: 'none'
-  },
-  controlsRow: {
-    display: 'flex',
-    gap: 8,
-    justifyContent: 'center',
-    pointerEvents: 'auto'
-  },
-  btn: {
-    padding: '10px 14px',
-    background: 'rgba(30,30,30,0.85)',
-    border: '1px solid #444',
-    borderRadius: 20,
-    color: '#fff',
-    cursor: 'pointer'
-  },
-  cta: {
-    alignSelf: 'center',
-    marginBottom: 16,
-    padding: '12px 18px',
-    background: '#1e90ff',
-    border: '1px solid #1e90ff',
-    borderRadius: 22,
-    color: '#fff',
-    cursor: 'pointer',
-    pointerEvents: 'auto'
-  },
-  captions: {
-    alignSelf: 'center',
-    marginTop: 10,
-    marginBottom: 10,
-    background: 'rgba(0,0,0,0.7)',
-    padding: '6px 10px',
-    borderRadius: 10,
-    fontSize: 14,
-    pointerEvents: 'none'
-  },
-  chatCard: {
-    marginTop: 16,
-    background: '#121212',
-    border: '1px solid #2a2a2a',
-    borderRadius: 12,
-    overflow: 'hidden'
-  },
-  chatHeader: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    padding: '10px 12px',
-    borderBottom: '1px solid #222',
-    background: '#0f0f0f'
-  },
-  chatScroll: {
-    maxHeight: 220,
-    overflow: 'auto',
-    padding: 12,
-    display: 'grid',
-    gap: 8
-  },
-  msg: {
-    padding: '8px 10px',
-    borderRadius: 10,
-    fontSize: 14
-  },
-  msgUser: { background: '#1d2a40' },
-  msgAssistant: { background: '#1f4021' },
-  msgSystem: { background: '#2a2a2a', fontStyle: 'italic' },
-  chatInputRow: {
-    display: 'flex',
-    gap: 8,
-    padding: 12,
-    borderTop: '1px solid #222',
-    background: '#0f0f0f'
-  },
-  input: {
-    flex: 1,
-    padding: '10px 12px',
-    borderRadius: 10,
-    border: '1px solid #333',
-    background: '#0e0e0e',
-    color: '#fff',
-    outline: 'none'
-  },
-  sendBtn: {
-    padding: '10px 14px',
-    borderRadius: 10,
-    border: '1px solid #1e90ff',
-    background: '#1e90ff',
-    color: '#fff',
-    cursor: 'pointer'
-  },
-  note: { marginTop: 8, opacity: 0.75, fontSize: 12 }
-};
+/* --- styles --- */
+const page = { minHeight:'100vh', background:'#0b0b0b', display:'grid', placeItems:'start center', padding:'32px 16px', color:'#fff', fontFamily:'system-ui, -apple-system, Segoe UI, Roboto, sans-serif' };
+const card = { width:'min(420px, 92vw)', display:'flex', flexDirection:'column', gap:10 };
+const pill = { alignSelf:'flex-start', background:'rgba(255,255,255,.08)', border:'1px solid rgba(255,255,255,.12)', padding:'6px 10px', borderRadius:10, fontSize:12 };
+const videoWrap = { width:'100%', aspectRatio:'3 / 4', borderRadius:16, overflow:'hidden', background:'#000', boxShadow:'0 6px 30px rgba(0,0,0,.35)' };
+const video = { width:'100%', height:'100%', objectFit:'cover', display:'block' };
+const controls = { display:'flex', gap:8, justifyContent:'center', marginTop:6 };
+const chip = { padding:'8px 12px', borderRadius:999, background:'#222', border:'1px solid #333', color:'#fff', cursor:'pointer', textDecoration:'none' };
+const chipPrimary = { ...chip, background:'#1e90ff', borderColor:'#1e90ff' };
+const chipDanger = { ...chip, background:'#b72d2d', borderColor:'#b72d2d' };
+
+const chatWrap = { background:'#121212', border:'1px solid #202020', borderRadius:12, overflow:'hidden' };
+const chatHeader = { display:'flex', justifyContent:'space-between', alignItems:'center', padding:'8px 10px', background:'#161616', borderBottom:'1px solid #202020', fontSize:13 };
+const chatBody = { maxHeight:220, overflow:'auto', padding:'8px' };
+const msgRow = { margin:'6px 0' };
+const bubbleBase = { display:'inline-block', padding:'8px 10px', borderRadius:10, lineHeight:1.25, fontSize:14 };
+const bubbleUser = { ...bubbleBase, background:'#1f3a6d', border:'1px solid #2b4f92' };
+const bubbleAgent = { ...bubbleBase, background:'#1c2a1c', border:'1px solid #254525' };
+const bubbleSystem = { ...bubbleBase, background:'#1a1a1a', border:'1px solid #2a2a2a' };
+const chatForm = { display:'flex', gap:8, padding:'8px', borderTop:'1px solid #202020' };
+const input = { flex:1, padding:'10px 12px', borderRadius:8, border:'1px solid #2a2a2a', background:'#0f0f0f', color:'#fff', outline:'none' };
+const sendBtn = { padding:'10px 14px', borderRadius:8, background:'#1e90ff', border:'1px solid #1e90ff', color:'#fff', cursor:'pointer' };
