@@ -1,9 +1,31 @@
 // app/lib/loadHeygenSdk.js
-// Safe for Next/Vercel: never import https:// at build time.
-// Load UMD scripts, and if we fall back to /heygen.umd.js, wait until it promotes the ESM to window.*.
+// Loads the HeyGen Streaming Avatar SDK from one of several sources
+// and returns a CONSTRUCTOR you can `new` with { token }.
+//
+// It supports modules that export:
+//   - default (function/class)
+//   - { StreamingAvatar: function/class }
+//   - { HeyGenStreamingAvatar: function/class }
+// and puts the chosen constructor on window.HeyGenStreamingAvatar for debugging.
 
-function loadScript(src) {
-  return new Promise((res, rej) => {
+let _ctor = null;
+let _loading = null;
+
+function pickCtor(mod) {
+  if (!mod) return null;
+  // candidates in order
+  const cands = [
+    mod.default,
+    mod.StreamingAvatar,
+    mod.HeyGenStreamingAvatar,
+    mod.Client,
+  ].filter(Boolean);
+  const picked = cands.find((c) => typeof c === 'function') || null;
+  return picked;
+}
+
+async function tryScript(src) {
+  await new Promise((res, rej) => {
     const s = document.createElement('script');
     s.src = src;
     s.async = true;
@@ -11,106 +33,65 @@ function loadScript(src) {
     s.onerror = () => rej(new Error(`script failed: ${src}`));
     document.head.appendChild(s);
   });
+  // Some UMDs set a global
+  const g = window.HeyGenStreamingAvatar;
+  if (typeof g === 'function') return g;
+  throw new Error('UMD global not present');
 }
 
-function waitForGlobal(key, ms = 5000, step = 50) {
-  return new Promise((res, rej) => {
-    const t0 = Date.now();
-    (function tick() {
-      if (window[key]) return res(window[key]);
-      if (Date.now() - t0 > ms) return rej(new Error(`global ${key} not ready`));
-      setTimeout(tick, step);
-    })();
-  });
+async function tryEsm(url) {
+  const mod = await import(/* @vite-ignore */ url);
+  // expose for debugging
+  window.__HEYGEN_MODULE__ = mod;
+  const ctor = pickCtor(mod);
+  if (ctor) {
+    window.HeyGenStreamingAvatar = ctor; // make it visible for other code paths
+    return ctor;
+  }
+  throw new Error('ESM loaded but no ctor found');
 }
 
 export async function loadHeygenSdk() {
-  if (typeof window === 'undefined') throw new Error('window unavailable');
+  if (_ctor) return _ctor;
+  if (_loading) return _loading;
 
-  // already present?
-  if (window.HeyGenStreamingAvatar) {
-    return normalizeCtor(window.HeyGenStreamingAvatar);
-  }
-
-  const cdns = [
+  const sources = [
+    // UMDs (often down recently, but keep them first if they come back)
     'https://cdn.jsdelivr.net/npm/@heygen/streaming-avatar@2.0.16/dist/index.umd.js',
     'https://unpkg.com/@heygen/streaming-avatar@2.0.16/dist/index.umd.js',
+    // Local shim that uses esm.sh (always available)
+    '/heygen.umd.js',
+    // Direct ESM as last resort (bypass local shim)
+    'https://esm.sh/@heygen/streaming-avatar@2.0.16?bundle&target=es2017',
   ];
 
-  // Try the public UMD builds first
-  for (const url of cdns) {
-    try {
-      console.log('[heygen loader] try:', url);
-      await loadScript(url);
-      if (window.HeyGenStreamingAvatar) {
-        console.log('[heygen loader] ok:', url);
-        return normalizeCtor(window.HeyGenStreamingAvatar);
-      }
-      throw new Error('loaded but no global');
-    } catch (e) {
-      console.warn('[heygen loader] failed:', url, e.message || e);
-    }
-  }
-
-  // Fallback: local shim in /public that ESM-imports and sets the global
-  try {
-    const bust = Date.now();
-    const local = `/heygen.umd.js?v=${bust}`;
-    console.log('[heygen loader] try local shim:', local);
-    await loadScript(local);
-    const Ctor = await waitForGlobal('HeyGenStreamingAvatar', 8000);
-    console.log('[heygen loader] shim ready');
-    return normalizeCtor(Ctor);
-  } catch (e) {
-    console.error('[heygen loader] local shim failed', e);
-    throw new Error('Failed to load HeyGen SDK from all sources');
-  }
-}
-
-function normalizeCtor(RawCtor) {
-  return class NormalizedHeygen extends RawCtor {
-    constructor(opts) {
-      super(opts);
-      this.__lastSession = null;
-
-      // If attachToElement already exists, keep it
-      if (typeof this.attachToElement === 'function') return;
-
-      // Alias a different helper name if present
-      if (typeof this.attachElement === 'function') {
-        this.attachToElement = (el) => this.attachElement(el);
-        return;
-      }
-
-      // Universal attacher
-      this.attachToElement = async (el) => {
-        if (!el) throw new Error('attachToElement: missing video element');
-
-        // API variant 1
-        if (typeof this.getRemoteMediaStream === 'function') {
-          const ms = await this.getRemoteMediaStream();
-          if (ms) { el.srcObject = ms; await el.play().catch(() => {}); return; }
+  _loading = (async () => {
+    for (const src of sources) {
+      try {
+        console.log('[heygen loader] try:', src);
+        if (src.startsWith('http') && src.includes('esm.sh')) {
+          const ctor = await tryEsm(src);
+          console.log('[heygen loader] esm ok');
+          return (_ctor = ctor);
         }
-
-        // API variant 2
-        if (typeof this.getMediaStream === 'function') {
-          const ms = await this.getMediaStream();
-          if (ms) { el.srcObject = ms; await el.play().catch(() => {}); return; }
+        if (src === '/heygen.umd.js') {
+          // Local shim imports ESM then sets window.HeyGenStreamingAvatar
+          await tryEsm('https://esm.sh/@heygen/streaming-avatar@2.0.16?bundle&target=es2017');
+          if (typeof window.HeyGenStreamingAvatar === 'function') {
+            console.log('[heygen loader] shim ready');
+            return (_ctor = window.HeyGenStreamingAvatar);
+          }
+          throw new Error('/heygen.umd.js loaded but no global');
         }
-
-        // Session-carried stream
-        const s = this.__lastSession;
-        const ms = s && (s.mediaStream || s.stream);
-        if (ms) { el.srcObject = ms; await el.play().catch(() => {}); return; }
-
-        throw new Error('No attach function or MediaStream available');
-      };
+        const ctor = await tryScript(src);
+        console.log('[heygen loader] umd ok');
+        return (_ctor = ctor);
+      } catch (e) {
+        console.warn('[heygen loader] failed:', src, e.message || e);
+      }
     }
+    throw new Error('Failed to load HeyGen Streaming Avatar SDK from all sources.');
+  })();
 
-    async createStartAvatar(opts) {
-      const session = await super.createStartAvatar(opts);
-      this.__lastSession = session;
-      return session;
-    }
-  };
+  return _loading;
 }
