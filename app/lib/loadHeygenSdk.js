@@ -1,54 +1,127 @@
-// Resilient loader. Tries UMD (jsDelivr/unpkg) then falls back to ESM shim (esm.sh).
+// app/lib/loadHeygenSdk.js
+// Loads HeyGen Streaming Avatar SDK from several CDNs,
+// and returns a constructor that ALWAYS has attachToElement(video)
+
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.async = true;
+    s.onload = () => res();
+    s.onerror = () => rej(new Error(`script failed: ${src}`));
+    document.head.appendChild(s);
+  });
+}
+
 export async function loadHeygenSdk() {
-  if (typeof window !== 'undefined' && window.HeyGenStreamingAvatar) {
-    return window.HeyGenStreamingAvatar;
+  if (typeof window === 'undefined') throw new Error('window unavailable');
+
+  // If global already exists, wrap & return immediately
+  if (window.HeyGenStreamingAvatar) {
+    return makeNormalizedCtor(window.HeyGenStreamingAvatar);
   }
 
-  const tryScript = (src) =>
-    new Promise((res, rej) => {
-      const s = document.createElement('script');
-      s.src = src + (src.includes('?') ? '&' : '?') + 'v=' + Date.now();
-      s.async = true;
-      s.onload = () =>
-        window.HeyGenStreamingAvatar
-          ? res(window.HeyGenStreamingAvatar)
-          : rej(new Error('loaded but no global'));
-      s.onerror = () => rej(new Error('script failed: ' + src));
-      document.head.appendChild(s);
-    });
-
-  const sources = [
+  const cdns = [
     'https://cdn.jsdelivr.net/npm/@heygen/streaming-avatar@2.0.16/dist/index.umd.js',
     'https://unpkg.com/@heygen/streaming-avatar@2.0.16/dist/index.umd.js',
-    '/heygen.umd.js', // your local shim in /public
+    // local file that shims ESM → global (you already have this):
+    '/heygen.umd.js'
   ];
 
-  // UMD attempts first
-  for (const src of sources) {
+  let lastErr = null;
+
+  // Try UMDs first
+  for (const url of cdns) {
     try {
-      console.log('[heygen loader] try:', src);
-      return await tryScript(src);
+      console.log('[heygen loader] try:', url);
+      await loadScript(url);
+      if (window.HeyGenStreamingAvatar) {
+        console.log('[heygen loader] ok:', url);
+        return makeNormalizedCtor(window.HeyGenStreamingAvatar);
+      }
+      throw new Error('loaded but no global');
     } catch (e) {
-      console.warn('[heygen loader] failed:', src, e?.message || e);
+      console.warn('[heygen loader] failed:', url, e.message || e);
+      lastErr = e;
     }
   }
 
-  // ESM fallback: build URL at runtime and tell webpack to ignore it
+  // FINAL FALLBACK — direct ESM import from esm.sh, then promote to global
   try {
-    const base = 'https://esm.sh/';
-    const pkg = '@heygen/streaming-avatar@2.0.16';
-    const qs = '?bundle&target=es2017';
-
-    const m = await import(
-      /* webpackIgnore: true */
-      (base + pkg + qs)
-    );
-
-    window.HeyGenStreamingAvatar = m.default || m;
-    console.log('[heygen loader] ESM shim ready');
-    return window.HeyGenStreamingAvatar;
+    console.log('[heygen loader] using ESM fallback');
+    const m = await import('https://esm.sh/@heygen/streaming-avatar@2.0.16?bundle&target=es2017');
+    const Ctor = m?.default || m;
+    if (!Ctor) throw new Error('esm missing default export');
+    window.HeyGenStreamingAvatar = Ctor; // expose for others
+    return makeNormalizedCtor(Ctor);
   } catch (e) {
-    console.error('[heygen loader] total failure', e);
-    throw new Error('Failed to load HeyGen Streaming Avatar SDK from all sources.');
+    console.error('[heygen loader] esm import failed', e);
+    throw lastErr || e || new Error('Failed to load HeyGen SDK from all sources');
   }
+}
+
+/**
+ * Wrap/patch the provided constructor so every instance supports:
+ *   - createStartAvatar(opts)
+ *   - attachToElement(videoEl)  ← we ensure this method exists and works
+ */
+function makeNormalizedCtor(RawCtor) {
+  return class NormalizedHeygen extends RawCtor {
+    constructor(opts) {
+      super(opts);
+      this.__lastSession = null;
+
+      // If a helper already exists, keep it
+      if (typeof this.attachToElement === 'function') return;
+
+      // If a differently named helper exists, alias it
+      if (typeof this.attachElement === 'function') {
+        this.attachToElement = (el) => this.attachElement(el);
+        return;
+      }
+
+      // Otherwise install a universal attachToElement
+      this.attachToElement = async (el) => {
+        if (!el) throw new Error('attachToElement: missing video element');
+
+        // 1) official getter (some esm builds expose this)
+        if (typeof this.getRemoteMediaStream === 'function') {
+          const ms = await this.getRemoteMediaStream();
+          if (ms && typeof ms === 'object') {
+            el.srcObject = ms;
+            await el.play().catch(() => {});
+            return;
+          }
+        }
+
+        // 2) a very similar getter name
+        if (typeof this.getMediaStream === 'function') {
+          const ms = await this.getMediaStream();
+          if (ms && typeof ms === 'object') {
+            el.srcObject = ms;
+            await el.play().catch(() => {});
+            return;
+          }
+        }
+
+        // 3) session carried the stream
+        const sess = this.__lastSession;
+        const ms = sess && (sess.mediaStream || sess.stream);
+        if (ms) {
+          el.srcObject = ms;
+          await el.play().catch(() => {});
+          return;
+        }
+
+        throw new Error('No attach function or MediaStream available');
+      };
+    }
+
+    // Wrap start to remember the session for the universal attacher
+    async createStartAvatar(opts) {
+      const session = await super.createStartAvatar(opts);
+      this.__lastSession = session;
+      return session;
+    }
+  };
 }
