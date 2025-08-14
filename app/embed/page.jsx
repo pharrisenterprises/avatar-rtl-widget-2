@@ -1,143 +1,161 @@
 'use client';
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { loadHeygenSdk } from '../lib/loadHeygenSdk';
+import { loadHeygenSdk } from '@/app/lib/loadHeygenSdk';
+
+const PANEL_W = 360; // compact widget size
+const PANEL_H = 420;
 
 export default function EmbedPage() {
   const videoRef = useRef(null);
-  const [status, setStatus] = useState('idle'); // idle | loading-sdk | starting | streaming | ended | error
+  const [status, setStatus] = useState('idle');        // idle | loading-sdk | starting | started | error | ended
   const [note, setNote] = useState('');
-  const [muted, setMuted] = useState(true);
-  const [micOn, setMicOn] = useState(false);
   const [chat, setChat] = useState([]);
-  const [sending, setSending] = useState(false);
+  const [input, setInput] = useState('');
+  const [muted, setMuted] = useState(false);
+  const startingRef = useRef(false);
 
-  const autostart = useMemo(() => {
-    if (typeof window === 'undefined') return false;
-    const u = new URL(window.location.href);
-    return u.searchParams.get('autostart') === '1';
-  }, []);
+  // helpers
+  const pushChat = (role, text) =>
+    setChat(prev => [...prev, { role, text, t: Date.now() }]);
+
+  async function getTokenAndAvatar() {
+    const [tokRes, avRes] = await Promise.all([
+      fetch('/api/heygen-token', { cache: 'no-store' }),
+      fetch('/api/heygen-avatars', { cache: 'no-store' }),
+    ]);
+    const tokJson = await tokRes.json();
+    const avJson = await avRes.json();
+    const token = tokJson?.token || tokJson?.access_token || tokJson?.data?.token;
+    const avatarName = avJson?.id || avJson?.avatarName || avJson?.name;
+    if (!token) throw new Error('No token from /api/heygen-token');
+    if (!avatarName) throw new Error('No avatar id from /api/heygen-avatars');
+    // make visible for quick debug
+    window.__HEYGEN_DEBUG__ = { token, avatarName };
+    return { token, avatarName };
+  }
+
+  // === UNIVERSAL ATTACH: tries every known shape (client + session) ===
+  async function attachUniversal({ client, session, el }) {
+    if (!el) throw new Error('attachUniversal: missing <video> element');
+
+    // 1) SDKs that expose client.attachToElement
+    if (typeof client.attachToElement === 'function') {
+      await client.attachToElement(el);
+      await el.play().catch(()=>{});
+      return true;
+    }
+    // 2) some expose client.attachElement
+    if (typeof client.attachElement === 'function') {
+      await client.attachElement(el);
+      await el.play().catch(()=>{});
+      return true;
+    }
+    // 3) client getter(s) → MediaStream
+    if (typeof client.getRemoteMediaStream === 'function') {
+      const ms = await client.getRemoteMediaStream();
+      if (ms) { el.srcObject = ms; await el.play().catch(()=>{}); return true; }
+    }
+    if (typeof client.getMediaStream === 'function') {
+      const ms = await client.getMediaStream();
+      if (ms) { el.srcObject = ms; await el.play().catch(()=>{}); return true; }
+    }
+    // 4) session-based helpers
+    if (session) {
+      if (typeof session.attachToElement === 'function') {
+        await session.attachToElement(el);
+        await el.play().catch(()=>{});
+        return true;
+      }
+      if (typeof session.attachElement === 'function') {
+        await session.attachElement(el);
+        await el.play().catch(()=>{});
+        return true;
+      }
+      const ms = session.mediaStream || session.stream || session.remoteStream;
+      if (ms) { el.srcObject = ms; await el.play().catch(()=>{}); return true; }
+    }
+    throw new Error('No attach function or MediaStream available');
+  }
 
   async function startAvatar() {
+    if (startingRef.current) return;
+    startingRef.current = true;
     try {
-      setStatus('loading-sdk');
-      setNote('Loading HeyGen SDK…');
-
+      setStatus('loading-sdk'); setNote('Loading HeyGen SDK…');
       const HeyGenStreamingAvatar = await loadHeygenSdk();
 
-      // 1) fetch session token (NOT API key)
-      const tRes = await fetch('/api/heygen-token', { cache: 'no-store' });
-      const tJson = await tRes.json();
-      const token = tJson?.token;
-      if (!token) throw new Error('No session token');
+      setNote('Fetching token + avatar id…');
+      const { token, avatarName } = await getTokenAndAvatar();
 
-      // 2) fetch avatar id (streaming avatar name like Wayne_20240711)
-      const aRes = await fetch('/api/heygen-avatars', { cache: 'no-store' });
-      const aJson = await aRes.json();
-      const avatarName = aJson?.id;
-      if (!avatarName) throw new Error('No avatarName');
+      setStatus('starting'); setNote(`Starting ${avatarName}…`);
 
-      window.__HEYGEN_DEBUG__ = { token, avatarName };
-
-      setStatus('starting');
-      setNote(`Starting ${avatarName}…`);
-
-      // 3) create client and start session
-      const client = new HeyGenStreamingAvatar({ token });
+      // Start the SDK (force v3 — older versions are deprecated)
+      const client = new HeyGenStreamingAvatar({ token }); // session token, not API key
       const session = await client.createStartAvatar({
         avatarName,
         quality: 'high',
-        version: 'v3', // ensure v3+
+        version: 'v3',
       });
 
-      // 4) Attach remote media to <video>, compatible across builds
-      const v = videoRef.current;
-      if (!v) throw new Error('missing <video>');
+      // Attach video using universal path
+      await attachUniversal({ client, session, el: videoRef.current });
 
-      // Prefer provided helper if present…
-      if (typeof client.attachToElement === 'function') {
-        await client.attachToElement(v);
-      } else if (typeof client.attachElement === 'function') {
-        // (some builds used attachElement)
-        await client.attachElement(v);
-      } else if (typeof client.getRemoteMediaStream === 'function') {
-        // (esm builds commonly provide a getter)
-        const ms = await client.getRemoteMediaStream();
-        if (!(ms instanceof MediaStream)) throw new Error('no MediaStream from getRemoteMediaStream()');
-        v.srcObject = ms;
-        await v.play().catch(() => {});
-      } else if (session && (session.mediaStream || session.stream)) {
-        // (older objects hung stream on the session)
-        const ms = session.mediaStream || session.stream;
-        v.srcObject = ms;
-        await v.play().catch(() => {});
-      } else {
-        throw new Error('No attach function or MediaStream available');
+      // set mute state on <video>
+      if (videoRef.current) {
+        videoRef.current.muted = !!muted;
+        await videoRef.current.play().catch(()=>{});
       }
 
-      // Auto-mute video element if our state says muted
-      v.muted = muted;
-
-      setStatus('streaming');
-      setNote('Streaming');
+      setStatus('started'); setNote('Streaming');
     } catch (e) {
       console.error(e);
-      setStatus('error');
-      setNote(e?.message || 'start failed');
+      setStatus('error'); setNote(e?.message || 'start failed');
+    } finally {
+      startingRef.current = false;
     }
   }
 
-  async function endAvatar() {
+  function stopAvatar() {
     try {
-      // very light end — refresh is simplest for demos
-      setStatus('ended');
-      setNote('Ended');
       if (videoRef.current) {
+        const ms = videoRef.current.srcObject;
+        if (ms && typeof ms.getTracks === 'function') {
+          ms.getTracks().forEach(t => t.stop());
+        }
         videoRef.current.srcObject = null;
-        videoRef.current.pause?.();
       }
-    } catch {}
+      setStatus('ended'); setNote('Stopped');
+    } catch (e) {
+      console.warn('stop error', e);
+    }
   }
 
-  // Text chat send uses our Retell proxy; if it’s not wired, you’ll see “(no response)”
-  async function sendMessage(text) {
-    const trimmed = text.trim();
-    if (!trimmed) return;
-    setChat((c) => [...c, { role: 'user', text: trimmed }]);
-    setSending(true);
+  async function sendText() {
+    const text = input.trim();
+    if (!text) return;
+    setInput('');
+    pushChat('user', text);
     try {
-      // Start (or reuse) chat
-      const start = await fetch('/api/retell-chat/start', { method: 'POST' }).then((r) => r.json());
-      if (!start?.ok) throw new Error(start?.error || 'retell start failed');
-
-      const reply = await fetch('/api/retell-chat/send', {
+      const r = await fetch('/api/retell-chat/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chatId: start.chatId, text: trimmed }),
-      }).then((r) => r.json());
-
-      const assistant = reply?.text || reply?.message || '(no response)';
-      setChat((c) => [...c, { role: 'assistant', text: assistant }]);
+        body: JSON.stringify({ text }),
+      }).then(r => r.json());
+      const reply =
+        r?.reply?.text || r?.text || r?.message || '(no response)';
+      pushChat('assistant', reply);
     } catch (e) {
-      console.error(e);
-      setChat((c) => [...c, { role: 'assistant', text: '(no response)' }]);
-    } finally {
-      setSending(false);
+      pushChat('assistant', '(send failed)');
     }
   }
 
-  function toggleMute() {
-    setMuted((m) => {
-      const nm = !m;
-      if (videoRef.current) videoRef.current.muted = nm;
-      return nm;
-    });
-  }
-
-  async function toggleMic() {
-    // This just flips the UI; wiring real mic into HeyGen depends on your plan
-    setMicOn((m) => !m);
-  }
+  // autostart support
+  const autostart = useMemo(() => {
+    try {
+      return new URLSearchParams(window.location.search).get('autostart') === '1';
+    } catch { return false; }
+  }, []);
 
   useEffect(() => {
     if (autostart) startAvatar();
@@ -145,149 +163,127 @@ export default function EmbedPage() {
   }, [autostart]);
 
   return (
-    <div style={page}>
-      <div style={card}>
-        <div style={badge}>{status} — {note}</div>
-        <div style={videoWrap}>
+    <div style={outerWrap}>
+      <div style={panel}>
+        <div style={tag(status)}>{status}{note ? ` — ${note}` : ''}</div>
+
+        <div style={videoShell}>
           <video
             ref={videoRef}
             autoPlay
             playsInline
             muted={muted}
-            style={video}
+            style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
           />
         </div>
 
         <div style={btnRow}>
-          <button style={btn} onClick={startAvatar} disabled={status === 'streaming' || status === 'starting'}>
-            Start
-          </button>
-          <button style={btn} onClick={toggleMute}>
-            {muted ? 'Unmute' : 'Mute'}
-          </button>
-          <button style={btn} onClick={toggleMic}>
-            {micOn ? 'Mic On' : 'Mic Off'}
-          </button>
-          <button style={btn} onClick={endAvatar}>
-            End
-          </button>
+          {status !== 'started' && <button onClick={startAvatar} style={btn}>Start</button>}
+          {status === 'started' && (
+            <>
+              <button onClick={() => { setMuted(m => !m); if (videoRef.current) videoRef.current.muted = !muted; }} style={btn}>
+                {muted ? 'Unmute' : 'Mute'}
+              </button>
+              <button onClick={stopAvatar} style={btn}>End</button>
+            </>
+          )}
         </div>
 
-        <div style={chatWrap}>
-          <div style={chatHead}>Text Chat <small>(demo)</small></div>
-          <div style={chatBody}>
-            {chat.map((m, i) => (
-              <div key={i} style={{ marginBottom: 6 }}>
-                <b>{m.role}:</b> <span style={{ opacity: 0.9 }}>{m.text}</span>
+        {/* Text chat */}
+        <div style={chatBox}>
+          <div style={chatHead}>Text Chat <span style={{opacity:.6, fontSize:12}}>(beta)</span></div>
+          <div style={chatLog}>
+            {chat.map(m => (
+              <div key={m.t} style={{ marginBottom: 6 }}>
+                <strong style={{ textTransform:'capitalize' }}>{m.role}:</strong>{' '}
+                <span>{m.text}</span>
               </div>
             ))}
           </div>
-          <ChatInput disabled={sending} onSend={sendMessage} />
+          <div style={chatInputRow}>
+            <input
+              value={input}
+              onChange={e=>setInput(e.target.value)}
+              onKeyDown={e=>{ if(e.key==='Enter') sendText(); }}
+              placeholder="Type a message…"
+              style={inputStyle}
+            />
+            <button onClick={sendText} style={btnSmall}>Send</button>
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-function ChatInput({ disabled, onSend }) {
-  const [val, setVal] = useState('');
-  return (
-    <div style={inputRow}>
-      <input
-        style={input}
-        value={val}
-        placeholder="Type a message…"
-        onChange={(e) => setVal(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && val.trim() && !disabled) {
-            onSend(val);
-            setVal('');
-          }
-        }}
-      />
-      <button style={sendBtn} disabled={disabled || !val.trim()} onClick={() => { onSend(val); setVal(''); }}>
-        Send
-      </button>
-    </div>
-  );
-}
-
-/* ——— styles: compact 360px widget ——— */
-const page = {
+/* --- styles --- */
+const outerWrap = {
   minHeight: '100vh',
   background: '#0b0b0b',
-  display: 'flex',
-  alignItems: 'flex-start',
-  justifyContent: 'center',
-  padding: '24px 12px'
-};
-const card = {
-  width: 360,
-  borderRadius: 14,
-  background: '#111',
+  display: 'grid',
+  placeItems: 'center',
   color: '#fff',
-  boxShadow: '0 8px 28px rgba(0,0,0,.5)',
-  padding: 10,
-  position: 'relative'
+  fontFamily: 'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto',
 };
-const badge = {
-  position: 'absolute',
-  top: 6,
-  left: 12,
-  fontSize: 10,
-  opacity: 0.8
+
+const panel = {
+  width: PANEL_W,
+  minHeight: PANEL_H,
+  borderRadius: 16,
+  background: '#111',
+  padding: 12,
+  boxShadow: '0 10px 30px rgba(0,0,0,0.45)',
 };
-const videoWrap = {
+
+const videoShell = {
   width: '100%',
-  aspectRatio: '3 / 4',
-  background: '#000',
+  aspectRatio: '3/4',
   borderRadius: 12,
   overflow: 'hidden',
-  border: '1px solid #222'
+  background: '#000',
 };
-const video = {
-  width: '100%',
-  height: '100%',
-  objectFit: 'cover',
-  display: 'block'
-};
-const btnRow = { display: 'flex', gap: 6, justifyContent: 'center', marginTop: 8 };
+
+const btnRow = { display: 'flex', gap: 8, marginTop: 8 };
 const btn = {
+  background: '#1e90ff',
+  border: '1px solid #1e90ff',
+  color: '#fff',
   padding: '6px 10px',
   borderRadius: 8,
-  background: '#1f2937',
-  border: '1px solid #334155',
-  color: '#fff',
   cursor: 'pointer',
-  fontSize: 12
+  fontSize: 14,
 };
-const chatWrap = { marginTop: 10 };
-const chatHead = { fontSize: 12, opacity: 0.9, marginBottom: 6 };
-const chatBody = {
+const btnSmall = { ...btn, padding: '6px 10px', fontSize: 13 };
+
+const tag = (s) => ({
+  display: 'inline-block',
+  fontSize: 12,
+  padding: '4px 8px',
+  borderRadius: 8,
+  marginBottom: 8,
+  background: s === 'started' ? '#12b88622' : '#ffffff14',
+  border: '1px solid #ffffff22',
+});
+
+const chatBox = { marginTop: 10 };
+const chatHead = { fontSize: 12, opacity: .8, marginBottom: 6 };
+const chatLog = {
   height: 90,
-  overflow: 'auto',
+  overflowY: 'auto',
+  border: '1px solid #2a2a2a',
   borderRadius: 8,
-  border: '1px solid #222',
   padding: 8,
-  background: '#0f0f0f',
-  marginBottom: 6
-};
-const inputRow = { display: 'flex', gap: 6 };
-const input = {
-  flex: 1,
-  background: '#0f0f0f',
-  border: '1px solid #222',
-  borderRadius: 8,
-  padding: '8px 10px',
-  color: '#fff',
-  fontSize: 13
-};
-const sendBtn = {
-  padding: '8px 12px',
-  borderRadius: 8,
-  background: '#2563eb',
-  border: '1px solid #1d4ed8',
-  color: '#fff',
+  background: '#0e0e0e',
+  marginBottom: 6,
   fontSize: 13,
-  cursor: 'pointer'
+};
+const chatInputRow = { display: 'flex', gap: 6 };
+const inputStyle = {
+  flex: 1,
+  background: '#0e0e0e',
+  color: '#fff',
+  border: '1px solid #2a2a2a',
+  borderRadius: 8,
+  padding: '6px 8px',
+  outline: 'none',
 };
