@@ -12,7 +12,7 @@ export default function EmbedPage() {
   const [note, setNote] = useState('');
   const [chat, setChat] = useState([]);
   const [input, setInput] = useState('');
-  const [muted, setMuted] = useState(true);          // start muted (web embed friendly)
+  const [muted, setMuted] = useState(true); // start muted (autoplay-friendly)
   const [chatId, setChatId] = useState(null);
   const startingRef = useRef(false);
 
@@ -24,18 +24,25 @@ export default function EmbedPage() {
       fetch('/api/heygen-token', { cache: 'no-store' }),
       fetch('/api/heygen-avatars', { cache: 'no-store' }),
     ]);
-    const tok = await tokRes.json();
-    const av = await avRes.json();
+    const tok = await tokRes.json().catch(() => ({}));
+    const av  = await avRes.json().catch(() => ({}));
+
+    // our API returns { token }, not { access_token }
     const token = tok?.token || tok?.access_token || tok?.data?.token;
+    // our avatar resolver returns { id: "<StreamingAvatarID>" }
     const avatarName = av?.id || av?.avatarName || av?.name;
+
     if (!token) throw new Error('No token from /api/heygen-token');
     if (!avatarName) throw new Error('No avatar id from /api/heygen-avatars');
-    window.__HEYGEN_DEBUG__ = { token, avatarName };
+
+    // surface for quick debugging
+    if (typeof window !== 'undefined') {
+      window.__HEYGEN_DEBUG__ = { token, avatarName };
+    }
     return { token, avatarName };
   }
 
-  // --- LIVEKIT ATTACH HELPERS ------------------------------------------------
-  // If the SDK exposes client.room (LiveKit Room), attach first subscribed VIDEO track to <video>
+  // ----------------------- LiveKit attach (if exposed) -----------------------
   async function attachFromLiveKitRoom(room, el) {
     return new Promise((resolve, reject) => {
       if (!room) return reject(new Error('no room'));
@@ -45,13 +52,10 @@ export default function EmbedPage() {
         try {
           if (!track || typeof track.attach !== 'function') return;
           const mediaEl = track.attach();
-          if (mediaEl instanceof HTMLVideoElement) {
-            // Replace mediaEl with our own <video>
-            el.srcObject = mediaEl.srcObject || null;
-          } else if (mediaEl instanceof HTMLMediaElement && mediaEl.srcObject) {
+          if (mediaEl?.srcObject) {
             el.srcObject = mediaEl.srcObject;
           }
-          el.play().catch(()=>{});
+          el.play().catch(() => {});
           done = true;
           resolve(true);
         } catch (e) {
@@ -59,16 +63,15 @@ export default function EmbedPage() {
         }
       };
 
-      // already-subscribed remote tracks?
+      // check any already-subscribed tracks
       const tryExisting = () => {
         try {
           const parts = Array.from(room.participants?.values?.() || []);
           for (const p of parts) {
             const pubs = Array.from(p.videoTracks?.values?.() || []);
             for (const pub of pubs) {
-              const track = pub.track;
-              if (track && pub.isSubscribed) {
-                useTrack(track);
+              if (pub.isSubscribed && pub.track) {
+                useTrack(pub.track);
                 return true;
               }
             }
@@ -76,80 +79,76 @@ export default function EmbedPage() {
         } catch {}
         return false;
       };
-
       if (tryExisting()) return;
 
-      const onTrack = (pub, track, participant) => {
-        if (done) return;
-        if (pub.kind === 'video' && track) {
-          useTrack(track);
-          cleanup();
-        }
-      };
-
-      const onSub = (track, pub, participant) => {
+      const onTrackSubscribed = (track, pub) => {
         if (done) return;
         if (pub?.kind === 'video' && track) {
           useTrack(track);
           cleanup();
         }
       };
-
+      const onTrackPublished = (pub) => {
+        if (done) return;
+        if (pub?.kind === 'video' && pub?.track) {
+          useTrack(pub.track);
+          cleanup();
+        }
+      };
       const cleanup = () => {
-        try { room.off?.('trackSubscribed', onSub); } catch {}
-        try { room.off?.('trackPublished', onTrack); } catch {}
+        try { room.off?.('trackSubscribed', onTrackSubscribed); } catch {}
+        try { room.off?.('trackPublished', onTrackPublished); } catch {}
       };
 
       try {
-        room.on?.('trackSubscribed', onSub);
-        room.on?.('trackPublished', onTrack);
+        room.on?.('trackSubscribed', onTrackSubscribed);
+        room.on?.('trackPublished', onTrackPublished);
       } catch {}
 
-      // time out in case nothing arrives
       setTimeout(() => {
         if (!done) reject(new Error('no livekit video track'));
       }, 5000);
     });
   }
 
-  // --- UNIVERSAL ATTACH ------------------------------------------------------
+  // ----------------------- Universal attach (all SDK shapes) -----------------
   async function attachUniversal({ client, session, el }) {
     if (!el) throw new Error('attachUniversal: missing <video>');
 
-    // 0) Simple client methods
+    // client attach
     if (typeof client.attachToElement === 'function') {
       await client.attachToElement(el);
-      await el.play().catch(()=>{});
+      await el.play().catch(() => {});
       return true;
     }
     if (typeof client.attachElement === 'function') {
       await client.attachElement(el);
-      await el.play().catch(()=>{});
+      await el.play().catch(() => {});
       return true;
     }
 
-    // 1) Client media getters
+    // client media getters
     for (const key of ['getRemoteMediaStream', 'getMediaStream']) {
       if (typeof client[key] === 'function') {
         const ms = await client[key]();
-        if (ms) { el.srcObject = ms; await el.play().catch(()=>{}); return true; }
+        if (ms) { el.srcObject = ms; await el.play().catch(() => {}); return true; }
       }
     }
 
-    // 2) Session helpers / direct streams
+    // session attach / media
     if (session) {
       for (const k of ['attachToElement', 'attachElement']) {
         if (typeof session[k] === 'function') {
           await session[k](el);
-          await el.play().catch(()=>{});
+          await el.play().catch(() => {});
           return true;
         }
       }
       const ms = session.mediaStream || session.stream || session.remoteStream;
-      if (ms) { el.srcObject = ms; await el.play().catch(()=>{}); return true; }
+      if (ms) { el.srcObject = ms; await el.play().catch(() => {}); return true; }
     }
 
-    // 3) LiveKit room path (several recent SDK builds expose this)
+    // LiveKit room
     const room = client.room || session?.room || client.livekit?.room;
     if (room) {
       await attachFromLiveKitRoom(room, el);
@@ -159,32 +158,43 @@ export default function EmbedPage() {
     throw new Error('No attach function or MediaStream available');
   }
 
+  // ----------------------- Start / Stop --------------------------------------
   async function startAvatar() {
     if (startingRef.current) return;
     startingRef.current = true;
     try {
       setStatus('loading-sdk'); setNote('Loading HeyGen SDK…');
-      const Ctor = await loadHeygenSdk();
+      const SDK = await loadHeygenSdk();
 
       setNote('Fetching token + avatar id…');
       const { token, avatarName } = await getTokenAndAvatar();
 
       setStatus('starting'); setNote(`Starting ${avatarName}…`);
 
+      const Ctor =
+        SDK?.HeyGenStreamingAvatar ||
+        SDK?.default ||
+        SDK;
+
+      if (typeof Ctor !== 'function') {
+        throw new Error('SDK client constructor not found');
+      }
+
       const client = new Ctor({ token });
+
+      // v3 is recommended by HeyGen
       const session = await client.createStartAvatar({
         avatarName,
         quality: 'high',
         version: 'v3',
       });
 
-      // Attach in every known way
       await attachUniversal({ client, session, el: videoRef.current });
 
-      // enforce mute state
+      // honor current mute state and kick playback
       if (videoRef.current) {
         videoRef.current.muted = !!muted;
-        await videoRef.current.play().catch(()=>{});
+        await videoRef.current.play().catch(() => {});
       }
 
       setStatus('started'); setNote('Streaming');
@@ -198,20 +208,22 @@ export default function EmbedPage() {
 
   function stopAvatar() {
     try {
-      if (videoRef.current) {
-        const ms = videoRef.current.srcObject;
-        if (ms && typeof ms.getTracks === 'function') ms.getTracks().forEach(t => t.stop());
-        videoRef.current.srcObject = null;
+      const v = videoRef.current;
+      if (v?.srcObject && typeof v.srcObject.getTracks === 'function') {
+        v.srcObject.getTracks().forEach(t => t.stop());
       }
+      if (v) v.srcObject = null;
       setStatus('ended'); setNote('Stopped');
-    } catch {}
+    } catch {
+      setStatus('ended'); setNote('Stopped');
+    }
   }
 
-  // --- Retell text chat (start once, then send) ------------------------------
+  // ----------------------- Retell (text) -------------------------------------
   async function ensureChat() {
     if (chatId) return chatId;
     const r = await fetch('/api/retell-chat/start', { cache: 'no-store' });
-    const j = await r.json().catch(()=> ({}));
+    const j = await r.json().catch(() => ({}));
     const id = j?.chatId || j?.id || j?.chat_id;
     if (!id) throw new Error('Retell start failed');
     setChatId(id);
@@ -230,25 +242,32 @@ export default function EmbedPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chatId: id, text }),
       });
-      const j = await r.json().catch(()=> ({}));
+      const j = await r.json().catch(() => ({}));
       const reply = j?.reply?.text || j?.text || j?.message || '(no response)';
       pushChat('assistant', reply);
-    } catch (e) {
+    } catch {
       pushChat('assistant', '(send failed)');
     }
   }
 
+  // ----------------------- Autostart -----------------------------------------
   const autostart = useMemo(() => {
-    try { return new URLSearchParams(window.location.search).get('autostart') === '1'; }
-    catch { return false; }
+    try {
+      return new URLSearchParams(window.location.search).get('autostart') === '1';
+    } catch { return false; }
   }, []);
 
-  useEffect(() => { if (autostart) startAvatar(); /* eslint-disable-next-line */ }, [autostart]);
+  useEffect(() => {
+    if (autostart) startAvatar();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autostart]);
 
   return (
     <div style={outerWrap}>
       <div style={panel}>
-        <div style={tag(status)}>{status}{note ? ` — ${note}` : ''}</div>
+        <div style={tag(status)}>
+          {status}{note ? ` — ${note}` : ''}
+        </div>
 
         <div style={videoShell}>
           <video
@@ -261,10 +280,18 @@ export default function EmbedPage() {
         </div>
 
         <div style={btnRow}>
-          {status !== 'started' && <button onClick={startAvatar} style={btn}>Start</button>}
+          {status !== 'started' && (
+            <button onClick={startAvatar} style={btn}>Start</button>
+          )}
           {status === 'started' && (
             <>
-              <button onClick={() => { setMuted(m => !m); if (videoRef.current) videoRef.current.muted = !muted; }} style={btn}>
+              <button
+                onClick={() => {
+                  setMuted(m => !m);
+                  if (videoRef.current) videoRef.current.muted = !muted;
+                }}
+                style={btn}
+              >
                 {muted ? 'Unmute' : 'Mute'}
               </button>
               <button onClick={stopAvatar} style={btn}>End</button>
@@ -273,7 +300,9 @@ export default function EmbedPage() {
         </div>
 
         <div style={chatBox}>
-          <div style={chatHead}>Text Chat <span style={{opacity:.6, fontSize:12}}>(beta)</span></div>
+          <div style={chatHead}>
+            Text Chat <span style={{opacity:.6, fontSize:12}}>(beta)</span>
+          </div>
           <div style={chatLog}>
             {chat.map(m => (
               <div key={m.t} style={{ marginBottom: 6 }}>
