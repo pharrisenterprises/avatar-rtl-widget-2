@@ -3,22 +3,25 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { loadHeygenSdk } from '@/app/lib/loadHeygenSdk';
 
+/** Compact widget size (good starting point for bottom-right embeds) */
 const PANEL_W = 360;
 const PANEL_H = 420;
 
 export default function EmbedPage() {
   const videoRef = useRef(null);
-  const [status, setStatus] = useState('idle');
+
+  const [status, setStatus] = useState('idle');            // idle | loading-sdk | starting | started | ended | error
   const [note, setNote] = useState('');
   const [chat, setChat] = useState([]);
   const [input, setInput] = useState('');
-  const [muted, setMuted] = useState(true); // start muted (autoplay-friendly)
+  const [muted, setMuted] = useState(true);                // start muted (web-embed friendly)
   const [chatId, setChatId] = useState(null);
   const startingRef = useRef(false);
 
   const pushChat = (role, text) =>
     setChat(prev => [...prev, { role, text, t: Date.now() }]);
 
+  /** fetch session token + streaming avatar id (avatarName) */
   async function getTokenAndAvatar() {
     const [tokRes, avRes] = await Promise.all([
       fetch('/api/heygen-token', { cache: 'no-store' }),
@@ -27,50 +30,51 @@ export default function EmbedPage() {
     const tok = await tokRes.json().catch(() => ({}));
     const av  = await avRes.json().catch(() => ({}));
 
-    // our API returns { token }, not { access_token }
+    // Accept a few common shapes but prefer { token } and { id }
     const token = tok?.token || tok?.access_token || tok?.data?.token;
-    // our avatar resolver returns { id: "<StreamingAvatarID>" }
     const avatarName = av?.id || av?.avatarName || av?.name;
 
-    if (!token) throw new Error('No token from /api/heygen-token');
+    if (!token)      throw new Error('No token from /api/heygen-token');
     if (!avatarName) throw new Error('No avatar id from /api/heygen-avatars');
 
-    // surface for quick debugging
-    if (typeof window !== 'undefined') {
-      window.__HEYGEN_DEBUG__ = { token, avatarName };
-    }
+    // expose for quick debugging
+    window.__HEYGEN_DEBUG__ = { token, avatarName };
     return { token, avatarName };
   }
 
-  // ----------------------- LiveKit attach (if exposed) -----------------------
+  // -------------------- LiveKit attach helper (waits up to 20s) --------------------
   async function attachFromLiveKitRoom(room, el) {
     return new Promise((resolve, reject) => {
       if (!room) return reject(new Error('no room'));
       let done = false;
+      const TIMEOUT_MS = 20000;
 
       const useTrack = (track) => {
         try {
           if (!track || typeof track.attach !== 'function') return;
           const mediaEl = track.attach();
-          if (mediaEl?.srcObject) {
+          if (mediaEl && mediaEl.srcObject) {
             el.srcObject = mediaEl.srcObject;
+          } else if (mediaEl instanceof HTMLVideoElement) {
+            el.srcObject = mediaEl.srcObject || null;
           }
-          el.play().catch(() => {});
+          el.play?.().catch(() => {});
           done = true;
+          cleanup();
           resolve(true);
         } catch (e) {
+          cleanup();
           reject(e);
         }
       };
 
-      // check any already-subscribed tracks
-      const tryExisting = () => {
+      const checkExisting = () => {
         try {
           const parts = Array.from(room.participants?.values?.() || []);
           for (const p of parts) {
             const pubs = Array.from(p.videoTracks?.values?.() || []);
             for (const pub of pubs) {
-              if (pub.isSubscribed && pub.track) {
+              if (pub?.isSubscribed && pub.track) {
                 useTrack(pub.track);
                 return true;
               }
@@ -79,26 +83,20 @@ export default function EmbedPage() {
         } catch {}
         return false;
       };
-      if (tryExisting()) return;
 
       const onTrackSubscribed = (track, pub) => {
-        if (done) return;
-        if (pub?.kind === 'video' && track) {
-          useTrack(track);
-          cleanup();
-        }
+        if (!done && pub?.kind === 'video' && track) useTrack(track);
       };
       const onTrackPublished = (pub) => {
-        if (done) return;
-        if (pub?.kind === 'video' && pub?.track) {
-          useTrack(pub.track);
-          cleanup();
-        }
+        if (!done && pub?.kind === 'video' && pub.track) useTrack(pub.track);
       };
+
       const cleanup = () => {
         try { room.off?.('trackSubscribed', onTrackSubscribed); } catch {}
         try { room.off?.('trackPublished', onTrackPublished); } catch {}
       };
+
+      if (checkExisting()) return;
 
       try {
         room.on?.('trackSubscribed', onTrackSubscribed);
@@ -106,49 +104,50 @@ export default function EmbedPage() {
       } catch {}
 
       setTimeout(() => {
-        if (!done) reject(new Error('no livekit video track'));
-      }, 5000);
+        if (!done) { cleanup(); reject(new Error('no livekit video track')); }
+      }, TIMEOUT_MS);
     });
   }
 
-  // ----------------------- Universal attach (all SDK shapes) -----------------
+  // -------------------- Universal attach (covers multiple SDK shapes) --------------------
   async function attachUniversal({ client, session, el }) {
     if (!el) throw new Error('attachUniversal: missing <video>');
+    el.muted = !!muted; // autoplay friendliness
 
-    // client attach
+    // 0) Client direct attach
     if (typeof client.attachToElement === 'function') {
       await client.attachToElement(el);
-      await el.play().catch(() => {});
+      await el.play?.().catch(() => {});
       return true;
     }
     if (typeof client.attachElement === 'function') {
       await client.attachElement(el);
-      await el.play().catch(() => {});
+      await el.play?.().catch(() => {});
       return true;
     }
 
-    // client media getters
+    // 1) Client media getters
     for (const key of ['getRemoteMediaStream', 'getMediaStream']) {
       if (typeof client[key] === 'function') {
         const ms = await client[key]();
-        if (ms) { el.srcObject = ms; await el.play().catch(() => {}); return true; }
+        if (ms) { el.srcObject = ms; await el.play?.().catch(() => {}); return true; }
       }
     }
 
-    // session attach / media
+    // 2) Session helpers / direct streams
     if (session) {
       for (const k of ['attachToElement', 'attachElement']) {
         if (typeof session[k] === 'function') {
           await session[k](el);
-          await el.play().catch(() => {});
+          await el.play?.().catch(() => {});
           return true;
         }
       }
       const ms = session.mediaStream || session.stream || session.remoteStream;
-      if (ms) { el.srcObject = ms; await el.play().catch(() => {}); return true; }
+      if (ms) { el.srcObject = ms; await el.play?.().catch(() => {}); return true; }
     }
 
-    // LiveKit room
+    // 3) LiveKit room (newer SDKs)
     const room = client.room || session?.room || client.livekit?.room;
     if (room) {
       await attachFromLiveKitRoom(room, el);
@@ -158,43 +157,32 @@ export default function EmbedPage() {
     throw new Error('No attach function or MediaStream available');
   }
 
-  // ----------------------- Start / Stop --------------------------------------
+  // -------------------- Start / Stop --------------------
   async function startAvatar() {
     if (startingRef.current) return;
     startingRef.current = true;
     try {
       setStatus('loading-sdk'); setNote('Loading HeyGen SDK…');
-      const SDK = await loadHeygenSdk();
+      const Ctor = await loadHeygenSdk();
 
       setNote('Fetching token + avatar id…');
       const { token, avatarName } = await getTokenAndAvatar();
 
       setStatus('starting'); setNote(`Starting ${avatarName}…`);
 
-      const Ctor =
-        SDK?.HeyGenStreamingAvatar ||
-        SDK?.default ||
-        SDK;
-
-      if (typeof Ctor !== 'function') {
-        throw new Error('SDK client constructor not found');
-      }
-
+      // Token is a *session token*, not the API key.
       const client = new Ctor({ token });
-
-      // v3 is recommended by HeyGen
       const session = await client.createStartAvatar({
-        avatarName,
+        avatarName,             // e.g., "Wayne_20240711"
         quality: 'high',
-        version: 'v3',
+        version: 'v3',          // v1/v2 are deprecated
       });
 
       await attachUniversal({ client, session, el: videoRef.current });
 
-      // honor current mute state and kick playback
       if (videoRef.current) {
         videoRef.current.muted = !!muted;
-        await videoRef.current.play().catch(() => {});
+        await videoRef.current.play?.().catch(() => {});
       }
 
       setStatus('started'); setNote('Streaming');
@@ -208,18 +196,16 @@ export default function EmbedPage() {
 
   function stopAvatar() {
     try {
-      const v = videoRef.current;
-      if (v?.srcObject && typeof v.srcObject.getTracks === 'function') {
-        v.srcObject.getTracks().forEach(t => t.stop());
+      if (videoRef.current) {
+        const ms = videoRef.current.srcObject;
+        if (ms && typeof ms.getTracks === 'function') ms.getTracks().forEach(t => t.stop());
+        videoRef.current.srcObject = null;
       }
-      if (v) v.srcObject = null;
       setStatus('ended'); setNote('Stopped');
-    } catch {
-      setStatus('ended'); setNote('Stopped');
-    }
+    } catch {}
   }
 
-  // ----------------------- Retell (text) -------------------------------------
+  // -------------------- Retell text chat (start once, then send) --------------------
   async function ensureChat() {
     if (chatId) return chatId;
     const r = await fetch('/api/retell-chat/start', { cache: 'no-store' });
@@ -250,24 +236,18 @@ export default function EmbedPage() {
     }
   }
 
-  // ----------------------- Autostart -----------------------------------------
+  // -------------------- Autostart support --------------------
   const autostart = useMemo(() => {
-    try {
-      return new URLSearchParams(window.location.search).get('autostart') === '1';
-    } catch { return false; }
+    try { return new URLSearchParams(window.location.search).get('autostart') === '1'; }
+    catch { return false; }
   }, []);
+  useEffect(() => { if (autostart) startAvatar(); /* eslint-disable-next-line */ }, [autostart]);
 
-  useEffect(() => {
-    if (autostart) startAvatar();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autostart]);
-
+  // -------------------- UI --------------------
   return (
     <div style={outerWrap}>
       <div style={panel}>
-        <div style={tag(status)}>
-          {status}{note ? ` — ${note}` : ''}
-        </div>
+        <div style={tag(status)}>{status}{note ? ` — ${note}` : ''}</div>
 
         <div style={videoShell}>
           <video
@@ -280,9 +260,7 @@ export default function EmbedPage() {
         </div>
 
         <div style={btnRow}>
-          {status !== 'started' && (
-            <button onClick={startAvatar} style={btn}>Start</button>
-          )}
+          {status !== 'started' && <button onClick={startAvatar} style={btn}>Start</button>}
           {status === 'started' && (
             <>
               <button
@@ -300,9 +278,7 @@ export default function EmbedPage() {
         </div>
 
         <div style={chatBox}>
-          <div style={chatHead}>
-            Text Chat <span style={{opacity:.6, fontSize:12}}>(beta)</span>
-          </div>
+          <div style={chatHead}>Text Chat <span style={{opacity:.6, fontSize:12}}>(beta)</span></div>
           <div style={chatLog}>
             {chat.map(m => (
               <div key={m.t} style={{ marginBottom: 6 }}>
@@ -327,7 +303,7 @@ export default function EmbedPage() {
   );
 }
 
-/* styles */
+/* ---------- styles ---------- */
 const outerWrap = {
   minHeight: '100vh',
   background: '#0b0b0b',
