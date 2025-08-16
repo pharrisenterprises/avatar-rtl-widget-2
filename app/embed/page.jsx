@@ -6,16 +6,13 @@ import { loadHeygenSdk } from '@/app/lib/loadHeygenSdk';
 const PANEL_W = 360;
 const PANEL_H = 420;
 
-// tiny helper: sleep
-const wait = (ms) => new Promise(r => setTimeout(r, ms));
-
 export default function EmbedPage() {
   const videoRef = useRef(null);
   const [status, setStatus] = useState('idle');
   const [note, setNote] = useState('');
   const [chat, setChat] = useState([]);
   const [input, setInput] = useState('');
-  const [muted, setMuted] = useState(true);   // start muted for embeds
+  const [muted, setMuted] = useState(true); // start muted (web-embed friendly)
   const [chatId, setChatId] = useState(null);
   const startingRef = useRef(false);
 
@@ -28,7 +25,7 @@ export default function EmbedPage() {
       fetch('/api/heygen-avatars', { cache: 'no-store' }),
     ]);
     const tok = await tokRes.json().catch(() => ({}));
-    const av  = await avRes.json().catch(() => ({}));
+    const av = await avRes.json().catch(() => ({}));
     const token = tok?.token || tok?.access_token || tok?.data?.token;
     const avatarName = av?.id || av?.avatarName || av?.name;
     if (!token) throw new Error('No token from /api/heygen-token');
@@ -37,17 +34,17 @@ export default function EmbedPage() {
     return { token, avatarName };
   }
 
-  // ---- Attach via LiveKit room exposed by SDK (if available)
-  async function attachFromSdkRoom(room, el) {
+  // ---------- LiveKit attach helper (wait longer for track) ----------
+  async function attachFromLiveKitRoom(room, el) {
     return new Promise((resolve, reject) => {
-      if (!room) return reject(new Error('no room from sdk'));
+      if (!room) return reject(new Error('no room'));
       let done = false;
+      const TIMEOUT_MS = 30000; // wait up to 30s
 
       const useTrack = (track) => {
         try {
           if (!track || typeof track.attach !== 'function') return;
           const mediaEl = track.attach();
-          // Prefer the track’s own media element’s stream if present
           if (mediaEl && mediaEl.srcObject) {
             el.srcObject = mediaEl.srcObject;
           } else if (mediaEl instanceof HTMLVideoElement) {
@@ -63,7 +60,7 @@ export default function EmbedPage() {
         }
       };
 
-      const tryExisting = () => {
+      const checkExisting = () => {
         try {
           const parts = Array.from(room.participants?.values?.() || []);
           for (const p of parts) {
@@ -79,162 +76,82 @@ export default function EmbedPage() {
         return false;
       };
 
-      const onSub = (track, pub /*, participant*/) => {
+      const onTrackSubscribed = (track, pub /*, participant */) => {
         if (!done && pub?.kind === 'video' && track) useTrack(track);
       };
-      const onPub = (pub /*, participant*/) => {
+      const onTrackPublished = (pub /*, participant */) => {
         if (!done && pub?.kind === 'video' && pub.track) useTrack(pub.track);
       };
+
       const cleanup = () => {
-        try { room.off?.('trackSubscribed', onSub); } catch {}
-        try { room.off?.('trackPublished', onPub); } catch {}
+        try { room.off?.('trackSubscribed', onTrackSubscribed); } catch {}
+        try { room.off?.('trackPublished', onTrackPublished); } catch {}
       };
 
-      if (tryExisting()) return;
+      if (checkExisting()) return;
 
       try {
-        room.on?.('trackSubscribed', onSub);
-        room.on?.('trackPublished', onPub);
+        room.on?.('trackSubscribed', onTrackSubscribed);
+        room.on?.('trackPublished', onTrackPublished);
       } catch {}
 
-      // wait up to 35s; HeyGen sometimes needs a few seconds to publish
-      const MAX_MS = 35000;
-      const start = Date.now();
-      const timer = setInterval(() => {
-        const elapsed = Date.now() - start;
-        if (done) { clearInterval(timer); return; }
-        if (elapsed > MAX_MS) {
-          clearInterval(timer);
-          cleanup();
-          reject(new Error('no livekit video track'));
-        }
-      }, 1000);
-    });
-  }
-
-  // ---- Hard fallback: connect to LiveKit with the credentials HeyGen returned
-  // uses an on-the-fly ESM import of livekit-client and subscribes to the first remote video track
-  async function attachViaDirectLiveKit(session, el) {
-    if (!session?.access_token || !session?.url) {
-      throw new Error('missing livekit credentials from session');
-    }
-
-    // dynamic ESM import (allowed by your CSP: ga.jspm.io is already whitelisted)
-    const { Room, connect } = await import(
-      'https://ga.jspm.io/npm:livekit-client@2.15.4/dist/livekit-client.esm.js'
-    );
-
-    const room = new Room();
-    await connect(session.url, session.access_token, { room });
-
-    // try already-published tracks
-    for (const p of room.participants.values()) {
-      for (const pub of p.videoTracks.values()) {
-        if (pub.isSubscribed && pub.track) {
-          const mediaEl = pub.track.attach();
-          el.srcObject = mediaEl?.srcObject || null;
-          await el.play?.().catch(() => {});
-          return true;
-        }
-      }
-    }
-
-    return new Promise((resolve, reject) => {
-      let done = false;
-
-      const onSub = async (track, pub) => {
-        if (done) return;
-        if (pub?.kind !== 'video' || !track) return;
-        const mediaEl = track.attach();
-        el.srcObject = mediaEl?.srcObject || null;
-        await el.play?.().catch(() => {});
-        done = true;
-        cleanup();
-        resolve(true);
-      };
-
-      const cleanup = () => {
-        try { room.off?.('trackSubscribed', onSub); } catch {}
-      };
-
-      try { room.on?.('trackSubscribed', onSub); } catch {}
-
-      // give the publisher some time to join and publish
       setTimeout(() => {
-        if (!done) {
-          cleanup();
-          reject(new Error('direct livekit attach timed out'));
-        }
-      }, 35000);
+        if (!done) { cleanup(); reject(new Error('no livekit video track')); }
+      }, TIMEOUT_MS);
     });
   }
 
-  // ---- Try *all* known attach avenues
+  // ---------- Universal attach (covers multiple SDK shapes) ----------
   async function attachUniversal({ client, session, el }) {
     if (!el) throw new Error('attachUniversal: missing <video>');
+
+    // Ensure autoplay friendliness
     el.muted = !!muted;
 
-    // A) SDK simple methods
+    // 0) Simple client methods
     if (typeof client.attachToElement === 'function') {
-      console.log('[ATTACH] via client.attachToElement');
       await client.attachToElement(el);
       await el.play?.().catch(() => {});
       return true;
     }
     if (typeof client.attachElement === 'function') {
-      console.log('[ATTACH] via client.attachElement');
       await client.attachElement(el);
       await el.play?.().catch(() => {});
       return true;
     }
 
-    // B) SDK getters
+    // 1) Client media getters
     for (const key of ['getRemoteMediaStream', 'getMediaStream']) {
       if (typeof client[key] === 'function') {
         const ms = await client[key]();
-        if (ms) {
-          console.log('[ATTACH] via client.', key);
-          el.srcObject = ms;
-          await el.play?.().catch(() => {});
-          return true;
-        }
+        if (ms) { el.srcObject = ms; await el.play?.().catch(() => {}); return true; }
       }
     }
 
-    // C) session helpers/direct streams
+    // 2) Session helpers / direct streams
     if (session) {
       for (const k of ['attachToElement', 'attachElement']) {
         if (typeof session[k] === 'function') {
-          console.log('[ATTACH] via session.', k);
           await session[k](el);
           await el.play?.().catch(() => {});
           return true;
         }
       }
       const ms = session.mediaStream || session.stream || session.remoteStream;
-      if (ms) {
-        console.log('[ATTACH] via session.MediaStream');
-        el.srcObject = ms;
-        await el.play?.().catch(() => {});
-        return true;
-      }
+      if (ms) { el.srcObject = ms; await el.play?.().catch(() => {}); return true; }
     }
 
-    // D) SDK-exposed LiveKit room
+    // 3) LiveKit room
     const room = client.room || session?.room || client.livekit?.room;
     if (room) {
-      console.log('[ATTACH] try SDK room');
-      await attachFromSdkRoom(room, el);
+      await attachFromLiveKitRoom(room, el);
       return true;
     }
 
-    // E) Hard fallback: connect directly to LK using HeyGen session creds
-    console.log('[ATTACH] direct LiveKit fallback');
-    await attachViaDirectLiveKit(session, el);
-    return true;
+    throw new Error('No attach function or MediaStream available');
   }
 
-  // ---- Start / Stop
+  // ---------- Start / Stop ----------
   async function startAvatar() {
     if (startingRef.current) return;
     startingRef.current = true;
@@ -244,19 +161,15 @@ export default function EmbedPage() {
 
       setNote('Fetching token + avatar id…');
       const { token, avatarName } = await getTokenAndAvatar();
-      console.log('[DBG] token/ava', { avatarName, tokenLen: (token||'').length });
 
       setStatus('starting'); setNote(`Starting ${avatarName}…`);
 
-      const client = new Ctor({ token });
-      console.log('[DBG] new client:', client);
-
+      const client = new Ctor({ token });               // token (session token), not API key
       const session = await client.createStartAvatar({
-        avatarName,
+        avatarName,                                     // e.g., "Wayne_20240711"
         quality: 'high',
         version: 'v3',
       });
-      console.log('[DBG] session:', session);
 
       await attachUniversal({ client, session, el: videoRef.current });
 
@@ -285,7 +198,7 @@ export default function EmbedPage() {
     } catch {}
   }
 
-  // ---- Retell text chat (start once, then send)
+  // ---------- Retell text chat (start once, then send) ----------
   async function ensureChat() {
     if (chatId) return chatId;
     const r = await fetch('/api/retell-chat/start', { cache: 'no-store' });
@@ -396,9 +309,9 @@ const videoShell = { width: '100%', aspectRatio: '3/4', borderRadius: 12, overfl
 const btnRow = { display: 'flex', gap: 8, marginTop: 8 };
 const btn = { background: '#1e90ff', border: '1px solid #1e90ff', color: '#fff', padding: '6px 10px', borderRadius: 8, cursor: 'pointer', fontSize: 14 };
 const btnSmall = { ...btn, padding: '6px 10px', fontSize: 13 };
-const tag = (s) => ({ display: 'inline-block', fontSize: 12, padding: '4px 8px', borderRadius: 8, marginBottom: 8, background: s === 'started' ? '#12b88622' : '#ffffff14', border: '1px solid #ffffff22' });
+const tag = (s) => ({ display:'inline-block', fontSize: 12, padding:'4px 8px', borderRadius: 8, marginBottom: 8, background: s === 'started' ? '#12b88622' : '#ffffff14', border:'1px solid #ffffff22' });
 const chatBox = { marginTop: 10 };
 const chatHead = { fontSize: 12, opacity: .8, marginBottom: 6 };
-const chatLog = { height: 90, overflowY: 'auto', border: '1px solid #2a2a2a', borderRadius: 8, padding: 8, background: '#0e0e0e', marginBottom: 6, fontSize: 13 };
-const chatInputRow = { display: 'flex', gap: 6 };
-const inputStyle = { flex: 1, background: '#0e0e0e', color: '#fff', border: '1px solid #2a2a2a', borderRadius: 8, padding: '6px 8px', outline: 'none' };
+const chatLog = { height: 90, overflowY: 'auto', border:'1px solid #2a2a2a', borderRadius: 8, padding: 8, background:'#0e0e0e', marginBottom: 6, fontSize: 13 };
+const chatInputRow = { display:'flex', gap: 6 };
+const inputStyle = { flex: 1, background:'#0e0e0e', color:'#fff', border:'1px solid #2a2a2a', borderRadius: 8, padding:'6px 8px', outline:'none' };
