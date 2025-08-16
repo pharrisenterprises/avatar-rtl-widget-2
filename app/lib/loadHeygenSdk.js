@@ -3,7 +3,6 @@
 // We PREFER the local shim to avoid CDN issues.
 
 export async function loadHeygenSdk() {
-  // helper to dynamically add a <script>
   const loadScript = (src) =>
     new Promise((resolve, reject) => {
       const s = document.createElement('script');
@@ -16,7 +15,7 @@ export async function loadHeygenSdk() {
 
   // 1) Local shim first (served from /public)
   try {
-    const local = `/heygen.umd.js?v=${Date.now()}`; // bust caches
+    const local = `/heygen.umd.js?v=${Date.now()}`;
     console.log('[heygen loader] try local shim:', local);
     await loadScript(local);
     if (window.HeyGenStreamingAvatar) {
@@ -28,10 +27,12 @@ export async function loadHeygenSdk() {
     console.warn('[heygen loader] failed local shim:', err.message || err);
   }
 
-  // 2) CDN UMD (jsDelivr then unpkg) — still here as backup
+  // 2) CDN UMD (jsDelivr, unpkg, jspm)
   const cdnList = [
     'https://cdn.jsdelivr.net/npm/@heygen/streaming-avatar@2.0.16/dist/index.umd.js',
-    'https://unpkg.com/@heygen/streaming-avatar@2.0.16/dist/index.umd.js'
+    'https://unpkg.com/@heygen/streaming-avatar@2.0.16/dist/index.umd.js',
+    // extra UMD fallback via jspm
+    'https://ga.jspm.io/npm:@heygen/streaming-avatar@2.0.16/dist/index.umd.js',
   ];
   for (const url of cdnList) {
     try {
@@ -44,7 +45,7 @@ export async function loadHeygenSdk() {
     }
   }
 
-  // 3) Last resort: direct ESM import (if CSP allows)
+  // 3) Last resort: direct ESM import (requires esm.sh allowed in CSP)
   try {
     const esm = 'https://esm.sh/@heygen/streaming-avatar@2.0.16?bundle&target=es2017';
     console.log('[heygen loader] try ESM import:', esm);
