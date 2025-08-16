@@ -35,108 +35,167 @@ export default function EmbedPage() {
     return { token, avatarName };
   }
 
-  // ------------ LiveKit attach helpers (be very patient + poll) ------------
-  function dumpRoom(room) {
+  // ---------- UTIL: attach a MediaStream to <video> ----------
+  async function attachStream(ms, el) {
+    if (!ms || !el) return false;
     try {
-      const parts = Array.from(room?.participants?.values?.() || []);
-      console.log('[DBG] room state:', room?.state, 'participants:', parts.length);
-      parts.forEach((p) => {
-        const pubs = Array.from(p?.videoTracks?.values?.() || []);
-        console.log('  participant', p.identity || p.sid, 'video pubs:', pubs.length);
-        pubs.forEach((pub) => {
-          console.log('   - pub:', {
-            subscribed: pub.isSubscribed,
-            track: !!pub.track,
-            kind: pub.kind,
-            sid: pub.sid
-          });
-        });
-      });
+      el.srcObject = ms;
+      el.muted = true; // keep autoplay-friendly, we mirror UI mute separately
+      await el.play?.().catch(() => {});
+      console.log('[DBG] attached via direct MediaStream');
+      return true;
     } catch (e) {
-      console.log('[DBG] dumpRoom err', e);
+      console.log('[DBG] attachStream failed', e);
+      return false;
     }
   }
 
-  async function waitForLiveKitTrack(room, el, timeoutMs = 30000) {
-    return new Promise((resolve, reject) => {
-      if (!room) return reject(new Error('no room'));
-      let done = false;
-      const startedAt = Date.now();
-
-      const useTrack = (track) => {
-        try {
-          if (!track || typeof track.attach !== 'function') return;
-          const mediaEl = track.attach();
-          if (mediaEl && mediaEl.srcObject) {
-            el.srcObject = mediaEl.srcObject;
-          } else if (mediaEl instanceof HTMLVideoElement) {
-            el.srcObject = mediaEl.srcObject || null;
-          }
-          el.play?.().catch(()=>{});
-          done = true;
-          cleanup();
-          console.log('[DBG] attached via LiveKit track.attach()');
-          resolve(true);
-        } catch (e) {
-          cleanup();
-          reject(e);
+  // ---------- PATH A: try direct shapes on client / session ----------
+  async function attachDirectShapes({ client, session, el }) {
+    // 0) built-in attach methods
+    for (const k of ['attachToElement', 'attachElement']) {
+      if (typeof client?.[k] === 'function') {
+        console.log('[DBG] using client.' + k);
+        await client[k](el);
+        await el.play?.().catch(()=>{});
+        return true;
+      }
+    }
+    // 1) getters
+    for (const k of ['getRemoteMediaStream', 'getMediaStream']) {
+      if (typeof client?.[k] === 'function') {
+        console.log('[DBG] using client.' + k);
+        const ms = await client[k]();
+        if (await attachStream(ms, el)) return true;
+      }
+    }
+    // 2) direct property
+    if (client?.mediaStream instanceof MediaStream) {
+      console.log('[DBG] using client.mediaStream');
+      if (await attachStream(client.mediaStream, el)) return true;
+    }
+    // session-based (some SDK builds expose helpers/streams on session)
+    if (session) {
+      for (const k of ['attachToElement', 'attachElement']) {
+        if (typeof session[k] === 'function') {
+          console.log('[DBG] using session.' + k);
+          await session[k](el);
+          await el.play?.().catch(()=>{});
+          return true;
         }
-      };
+      }
+      const ms = session.mediaStream || session.stream || session.remoteStream;
+      if (ms) {
+        console.log('[DBG] using session.*stream');
+        if (await attachStream(ms, el)) return true;
+      }
+    }
+    return false;
+  }
 
-      const scanExisting = () => {
-        try {
-          const parts = Array.from(room.participants?.values?.() || []);
-          for (const p of parts) {
-            const pubs = Array.from(p.videoTracks?.values?.() || []);
-            for (const pub of pubs) {
-              if (pub?.isSubscribed && pub.track) {
-                console.log('[DBG] found existing subscribed track');
-                useTrack(pub.track);
-                return true;
-              }
-            }
-          }
-        } catch {}
-        return false;
-      };
+  // ---------- PATH B: LiveKit (local OR remote) ----------
+  function firstVideoTrackFromPubs(pubs) {
+    for (const pub of pubs) {
+      const t = pub?.track;
+      if (pub?.kind === 'video' && t && typeof t.attach === 'function') {
+        return t;
+      }
+    }
+    return null;
+  }
 
-      const onTrackSubscribed = (track, pub) => {
-        console.log('[DBG] event: trackSubscribed', pub?.kind, !!track);
-        if (!done && pub?.kind === 'video' && track) useTrack(track);
-      };
-      const onTrackPublished = (pub) => {
-        console.log('[DBG] event: trackPublished', pub?.kind, !!pub?.track);
-        if (!done && pub?.kind === 'video' && pub.track) useTrack(pub.track);
-      };
+  async function attachFromLiveKit({ client, el, waitMs = 30000 }) {
+    const room = client?.room || client?.livekit?.room;
+    if (!room) throw new Error('no room');
 
-      const cleanup = () => {
-        try { room.off?.('trackSubscribed', onTrackSubscribed); } catch {}
-        try { room.off?.('trackPublished', onTrackPublished); } catch {}
-      };
+    // Try LOCAL participant first (some builds publish render as local track)
+    try {
+      const lp = room.localParticipant;
+      if (lp?.videoTracks?.size) {
+        const pubs = Array.from(lp.videoTracks.values());
+        const vt = firstVideoTrackFromPubs(pubs);
+        if (vt) {
+          const mediaEl = vt.attach();
+          el.srcObject = mediaEl?.srcObject || null;
+          await el.play?.().catch(()=>{});
+          console.log('[DBG] attached via LOCAL LiveKit track');
+          return true;
+        }
+      }
+    } catch {}
 
-      // wire events
-      try {
-        room.on?.('trackSubscribed', onTrackSubscribed);
-        room.on?.('trackPublished', onTrackPublished);
-      } catch {}
+    // Then try REMOTE participants (older/other builds)
+    let done = false;
+    const started = Date.now();
 
-      // poll every 1s
-      const poll = setInterval(() => {
-        if (done) { clearInterval(poll); return; }
-        const waited = Date.now() - startedAt;
-        console.log('[DBG] poll livekit… waited', waited, 'ms');
-        dumpRoom(room);
-        if (scanExisting()) { clearInterval(poll); return; }
-        if (waited > timeoutMs) {
-          clearInterval(poll);
+    const tryRemotes = () => {
+      const parts = Array.from(room.participants?.values?.() || []);
+      for (const p of parts) {
+        const pubs = Array.from(p.videoTracks?.values?.() || []);
+        const vt = firstVideoTrackFromPubs(pubs);
+        if (vt) {
+          const mediaEl = vt.attach();
+          el.srcObject = mediaEl?.srcObject || null;
+          el.play?.().catch(()=>{});
+          console.log('[DBG] attached via REMOTE LiveKit track');
+          return true;
+        }
+      }
+      return false;
+    };
+
+    // quick scan before waiting
+    if (tryRemotes()) return true;
+
+    // subscribe to events + poll
+    const onTrackSubscribed = (track, pub) => {
+      if (done) return;
+      if (pub?.kind === 'video' && track) {
+        const mediaEl = track.attach();
+        el.srcObject = mediaEl?.srcObject || null;
+        el.play?.().catch(()=>{});
+        done = true;
+        cleanup();
+        console.log('[DBG] attached via REMOTE event trackSubscribed');
+      }
+    };
+    const onTrackPublished = (pub) => {
+      if (done) return;
+      if (pub?.kind === 'video' && pub?.track) {
+        const mediaEl = pub.track.attach();
+        el.srcObject = mediaEl?.srcObject || null;
+        el.play?.().catch(()=>{});
+        done = true;
+        cleanup();
+        console.log('[DBG] attached via REMOTE event trackPublished');
+      }
+    };
+    const cleanup = () => {
+      try { room.off?.('trackSubscribed', onTrackSubscribed); } catch {}
+      try { room.off?.('trackPublished', onTrackPublished); } catch {}
+    };
+
+    try { room.on?.('trackSubscribed', onTrackSubscribed); } catch {}
+    try { room.on?.('trackPublished', onTrackPublished); } catch {}
+
+    await new Promise((resolve, reject) => {
+      const iv = setInterval(() => {
+        if (done) { clearInterval(iv); return; }
+        const waited = Date.now() - started;
+        console.log('[DBG] LiveKit poll… waited', waited, 'ms; remotes:', room.participants?.size || 0);
+        if (tryRemotes()) { clearInterval(iv); resolve(true); return; }
+        if (waited > waitMs) {
+          clearInterval(iv);
           cleanup();
           reject(new Error('no livekit video track'));
         }
       }, 1000);
     });
+
+    return true;
   }
 
-  // ------------ Universal attach (try ALL shapes we’ve seen) ------------
+  // ---------- Universal attach (A then B) ----------
   async function attachUniversal({ client, session, el }) {
     if (!el) throw new Error('attachUniversal: missing <video>');
     el.muted = !!muted;
@@ -144,51 +203,12 @@ export default function EmbedPage() {
     console.log('[DBG] client keys:', Object.keys(client || {}));
     if (session) console.log('[DBG] session keys:', Object.keys(session || {}));
 
-    // A) direct client attach
-    for (const k of ['attachToElement','attachElement']) {
-      if (typeof client[k] === 'function') {
-        console.log('[DBG] using client.'+k);
-        await client[k](el);
-        await el.play?.().catch(()=>{});
-        return true;
-      }
-    }
-
-    // B) client media getters
-    for (const k of ['getRemoteMediaStream','getMediaStream']) {
-      if (typeof client[k] === 'function') {
-        console.log('[DBG] using client.'+k);
-        const ms = await client[k]();
-        if (ms) { el.srcObject = ms; await el.play?.().catch(()=>{}); return true; }
-      }
-    }
-
-    // C) session helpers
-    if (session) {
-      for (const k of ['attachToElement','attachElement']) {
-        if (typeof session[k] === 'function') {
-          console.log('[DBG] using session.'+k);
-          await session[k](el);
-          await el.play?.().catch(()=>{});
-          return true;
-        }
-      }
-      const ms = session.mediaStream || session.stream || session.remoteStream;
-      if (ms) { console.log('[DBG] using session.*stream'); el.srcObject = ms; await el.play?.().catch(()=>{}); return true; }
-    }
-
-    // D) livekit
-    const room = client.room || session?.room || client.livekit?.room;
-    if (room) {
-      console.log('[DBG] trying LiveKit room attach…');
-      await waitForLiveKitTrack(room, el, 30000);
-      return true;
-    }
-
-    throw new Error('No attach function or MediaStream available');
+    if (await attachDirectShapes({ client, session, el })) return true;
+    await attachFromLiveKit({ client, el, waitMs: 30000 });
+    return true;
   }
 
-  // ------------ Start / Stop ------------
+  // ---------- Start / Stop ----------
   async function startAvatar() {
     if (startingRef.current) return;
     startingRef.current = true;
@@ -238,7 +258,7 @@ export default function EmbedPage() {
     } catch {}
   }
 
-  // ------------ Retell text chat ------------
+  // ---------- Retell text chat ----------
   async function ensureChat() {
     if (chatId) return chatId;
     const r = await fetch('/api/retell-chat/start', { cache: 'no-store' });
@@ -351,7 +371,6 @@ const btnSmall = { ...btn, padding:'6px 10px', fontSize:13 };
 const tag = (s) => ({ display:'inline-block', fontSize:12, padding:'4px 8px', borderRadius:8, marginBottom:8, background:s==='started'?'#12b88622':'#ffffff14', border:'1px solid #ffffff22' });
 const chatBox = { marginTop: 10 };
 const chatHead = { fontSize: 12, opacity:.8, marginBottom: 6 };
-const chatLog = { height: 90, overflowY:'auto', border:'1px solid #2a2a2a', borderRadius:8, padding:8, background:'#0e0e0e', marginBottom:6, fontSize:13 };
+const chatLog = { height: 90, overflowY:'auto', border:'1px solid #2a2a2a', borderRadius:8, padding:8, background:'#0e0e0e', marginBottom: 6, fontSize:13 };
 const chatInputRow = { display:'flex', gap:6 };
 const inputStyle = { flex:1, background:'#0e0e0e', color:'#fff', border:'1px solid #2a2a2a', borderRadius:8, padding:'6px 8px', outline:'none' };
-
