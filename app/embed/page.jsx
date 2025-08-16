@@ -12,7 +12,7 @@ export default function EmbedPage() {
   const [note, setNote] = useState('');
   const [chat, setChat] = useState([]);
   const [input, setInput] = useState('');
-  const [muted, setMuted] = useState(true); // start muted (web-embed friendly)
+  const [muted, setMuted] = useState(true);
   const [chatId, setChatId] = useState(null);
   const startingRef = useRef(false);
 
@@ -30,16 +30,16 @@ export default function EmbedPage() {
     const avatarName = av?.id || av?.avatarName || av?.name;
     if (!token) throw new Error('No token from /api/heygen-token');
     if (!avatarName) throw new Error('No avatar id from /api/heygen-avatars');
-    window.__HEYGEN_DEBUG__ = { token, avatarName };
+    window.__HEYGEN_DEBUG__ = { token, avatarName, tokenLen: String(token).length };
     return { token, avatarName };
   }
 
-  // ---------- LiveKit attach helper (wait longer for track) ----------
   async function attachFromLiveKitRoom(room, el) {
     return new Promise((resolve, reject) => {
       if (!room) return reject(new Error('no room'));
       let done = false;
-      const TIMEOUT_MS = 30000; // wait up to 30s
+      const TIMEOUT_MS = 31000;
+      const started = Date.now();
 
       const useTrack = (track) => {
         try {
@@ -76,10 +76,10 @@ export default function EmbedPage() {
         return false;
       };
 
-      const onTrackSubscribed = (track, pub /*, participant */) => {
+      const onTrackSubscribed = (track, pub) => {
         if (!done && pub?.kind === 'video' && track) useTrack(track);
       };
-      const onTrackPublished = (pub /*, participant */) => {
+      const onTrackPublished = (pub) => {
         if (!done && pub?.kind === 'video' && pub.track) useTrack(pub.track);
       };
 
@@ -95,20 +95,25 @@ export default function EmbedPage() {
         room.on?.('trackPublished', onTrackPublished);
       } catch {}
 
-      setTimeout(() => {
-        if (!done) { cleanup(); reject(new Error('no livekit video track')); }
-      }, TIMEOUT_MS);
+      const tick = () => {
+        if (done) return;
+        const elapsed = Date.now() - started;
+        if (elapsed >= TIMEOUT_MS) {
+          cleanup();
+          reject(new Error('no livekit video track'));
+          return;
+        }
+        if (checkExisting()) return;
+        setTimeout(tick, 1000);
+      };
+      tick();
     });
   }
 
-  // ---------- Universal attach (covers multiple SDK shapes) ----------
   async function attachUniversal({ client, session, el }) {
     if (!el) throw new Error('attachUniversal: missing <video>');
-
-    // Ensure autoplay friendliness
     el.muted = !!muted;
 
-    // 0) Simple client methods
     if (typeof client.attachToElement === 'function') {
       await client.attachToElement(el);
       await el.play?.().catch(() => {});
@@ -120,7 +125,6 @@ export default function EmbedPage() {
       return true;
     }
 
-    // 1) Client media getters
     for (const key of ['getRemoteMediaStream', 'getMediaStream']) {
       if (typeof client[key] === 'function') {
         const ms = await client[key]();
@@ -128,7 +132,6 @@ export default function EmbedPage() {
       }
     }
 
-    // 2) Session helpers / direct streams
     if (session) {
       for (const k of ['attachToElement', 'attachElement']) {
         if (typeof session[k] === 'function') {
@@ -141,7 +144,6 @@ export default function EmbedPage() {
       if (ms) { el.srcObject = ms; await el.play?.().catch(() => {}); return true; }
     }
 
-    // 3) LiveKit room
     const room = client.room || session?.room || client.livekit?.room;
     if (room) {
       await attachFromLiveKitRoom(room, el);
@@ -151,7 +153,6 @@ export default function EmbedPage() {
     throw new Error('No attach function or MediaStream available');
   }
 
-  // ---------- Start / Stop ----------
   async function startAvatar() {
     if (startingRef.current) return;
     startingRef.current = true;
@@ -164,9 +165,9 @@ export default function EmbedPage() {
 
       setStatus('starting'); setNote(`Starting ${avatarName}…`);
 
-      const client = new Ctor({ token });               // token (session token), not API key
+      const client = new Ctor({ token });
       const session = await client.createStartAvatar({
-        avatarName,                                     // e.g., "Wayne_20240711"
+        avatarName,
         quality: 'high',
         version: 'v3',
       });
@@ -198,7 +199,6 @@ export default function EmbedPage() {
     } catch {}
   }
 
-  // ---------- Retell text chat (start once, then send) ----------
   async function ensureChat() {
     if (chatId) return chatId;
     const r = await fetch('/api/retell-chat/start', { cache: 'no-store' });
@@ -224,7 +224,7 @@ export default function EmbedPage() {
       const j = await r.json().catch(() => ({}));
       const reply = j?.reply?.text || j?.text || j?.message || '(no response)';
       pushChat('assistant', reply);
-    } catch (e) {
+    } catch {
       pushChat('assistant', '(send failed)');
     }
   }
@@ -312,6 +312,6 @@ const btnSmall = { ...btn, padding: '6px 10px', fontSize: 13 };
 const tag = (s) => ({ display:'inline-block', fontSize: 12, padding:'4px 8px', borderRadius: 8, marginBottom: 8, background: s === 'started' ? '#12b88622' : '#ffffff14', border:'1px solid #ffffff22' });
 const chatBox = { marginTop: 10 };
 const chatHead = { fontSize: 12, opacity: .8, marginBottom: 6 };
-const chatLog = { height: 90, overflowY: 'auto', border:'1px solid #2a2a2a', borderRadius: 8, padding: 8, background:'#0e0e0e', marginBottom: 6, fontSize: 13 };
-const chatInputRow = { display:'flex', gap: 6 };
-const inputStyle = { flex: 1, background:'#0e0e0e', color:'#fff', border:'1px solid #2a2a2a', borderRadius: 8, padding:'6px 8px', outline:'none' };
+const chatLog = { height: 90, overflowY:'auto', border:'1px solid #2a2a2a', borderRadius:8, padding:8, background:'#0e0e0e', marginBottom: 6, fontSize:13 };
+const chatInputRow = { display:'flex', gap:6 };
+const inputStyle = { flex:1, background:'#0e0e0e', color:'#fff', border:'1px solid #2a2a2a', borderRadius:8, padding:'6px 8px', outline:'none' };
