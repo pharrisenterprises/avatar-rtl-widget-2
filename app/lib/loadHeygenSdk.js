@@ -1,32 +1,38 @@
 // /app/lib/loadHeygenSdk.js
-// Loads the HeyGen Streaming Avatar UMD from *your* server via /api/heygen-sdk.
-// No external imports, so Webpack won't try to bundle remote URLs.
+// Loads HeyGen UMD at runtime via <script>, trying CDNs first, then our local proxy.
+// No ESM imports -> avoids Webpack "UnhandledScheme" issues during build.
 
 let cachedCtor = null;
 
-function injectScriptOnce(src, checkReady, timeoutMs = 15000) {
+function pickCtorFromGlobal() {
+  return (
+    // most common
+    window.HeyGenStreamingAvatar ||
+    // some builds hang a namespace
+    (window.HeyGen && (window.HeyGen.StreamingAvatar || window.HeyGen.streamingAvatar)) ||
+    // ultra-simple globals
+    window.streamingAvatar ||
+    null
+  );
+}
+
+function injectScriptOnce(src, timeoutMs = 12000) {
   return new Promise((resolve, reject) => {
-    // if already there, resolve
-    try {
-      const ready = checkReady?.();
-      if (ready) return resolve(ready);
-    } catch {}
+    // already ready?
+    const ready = pickCtorFromGlobal();
+    if (ready) return resolve(ready);
 
     const s = document.createElement('script');
     s.async = true;
     s.src = src;
 
-    const done = () => {
-      try {
-        const ready = checkReady?.();
-        if (ready) resolve(ready);
-        else reject(new Error('script loaded but global not found'));
-      } catch (e) {
-        reject(e);
-      }
+    const onDone = () => {
+      const ctor = pickCtorFromGlobal();
+      if (ctor) resolve(ctor);
+      else reject(new Error(`script loaded but global not found: ${src}`));
     };
 
-    s.onload = done;
+    s.onload = onDone;
     s.onerror = () => reject(new Error(`script failed: ${src}`));
     document.head.appendChild(s);
 
@@ -34,22 +40,29 @@ function injectScriptOnce(src, checkReady, timeoutMs = 15000) {
   });
 }
 
-function pickCtorFromGlobal() {
-  // Try the common global names the UMD may set
-  return (
-    window.HeyGenStreamingAvatar ||
-    (window.HeyGen && (window.HeyGen.StreamingAvatar || window.HeyGen.streamingAvatar)) ||
-    window.streamingAvatar ||
-    null
-  );
-}
-
 export async function loadHeygenSdk() {
   if (cachedCtor) return cachedCtor;
 
-  // Always load from our local proxy (same-origin => CSP-safe, build-safe)
-  const ctor = await injectScriptOnce('/api/heygen-sdk', pickCtorFromGlobal);
-  if (!ctor) throw new Error('Failed to load HeyGen SDK via local proxy.');
-  cachedCtor = ctor;
-  return ctor;
+  const SOURCES = [
+    // best shot first
+    'https://cdn.jsdelivr.net/npm/@heygen/streaming-avatar@2.0.16/dist/index.umd.js',
+    'https://unpkg.com/@heygen/streaming-avatar@2.0.16/dist/index.umd.js',
+    'https://ga.jspm.io/npm:@heygen/streaming-avatar@2.0.16/dist/index.umd.js',
+    // final fallback: our proxy (same-origin, CSP-safe)
+    '/api/heygen-sdk',
+  ];
+
+  let lastErr;
+  for (const src of SOURCES) {
+    try {
+      const ctor = await injectScriptOnce(src);
+      if (!ctor) throw new Error('no ctor');
+      cachedCtor = ctor;
+      return ctor;
+    } catch (e) {
+      lastErr = e;
+      // try next source
+    }
+  }
+  throw lastErr || new Error('Failed to load HeyGen Streaming Avatar SDK from all sources.');
 }
