@@ -19,6 +19,7 @@ export default function EmbedPage() {
   const pushChat = (role, text) =>
     setChat(prev => [...prev, { role, text, t: Date.now() }]);
 
+  // --- Token + AvatarId from our API routes / env ---
   async function getTokenAndAvatar() {
     const [tokRes, avRes] = await Promise.all([
       fetch('/api/heygen-token', { cache: 'no-store' }),
@@ -26,14 +27,26 @@ export default function EmbedPage() {
     ]);
     const tok = await tokRes.json().catch(() => ({}));
     const av = await avRes.json().catch(() => ({}));
-    const token = tok?.token || tok?.access_token || tok?.data?.token;
-    const avatarName = av?.id || av?.avatarName || av?.name;
+
+    const token =
+      tok?.token ||
+      tok?.access_token ||
+      tok?.data?.token ||
+      '';
+
+    // Use the ID returned by /api/heygen-avatars; fallback to NEXT_PUBLIC_HEYGEN_AVATAR_NAME if present
+    const avatarId = av?.id || process.env.NEXT_PUBLIC_HEYGEN_AVATAR_NAME || '';
+
     if (!token) throw new Error('No token from /api/heygen-token');
-    if (!avatarName) throw new Error('No avatar id from /api/heygen-avatars');
-    window.__HEYGEN_DEBUG__ = { token, avatarName, tokenLen: String(token).length };
-    return { token, avatarName };
+    if (!avatarId) throw new Error('No avatar id from /api/heygen-avatars');
+
+    // helpful for debugging in the browser
+    window.__HEYGEN_DEBUG__ = { tokenLen: String(token).length, avatarId };
+
+    return { token, avatarId };
   }
 
+  // --- LiveKit attach helper (poll for a remote video track) ---
   async function attachFromLiveKitRoom(room, el) {
     return new Promise((resolve, reject) => {
       if (!room) return reject(new Error('no room'));
@@ -110,10 +123,12 @@ export default function EmbedPage() {
     });
   }
 
+  // --- Universal attach (covers multiple SDK shapes) ---
   async function attachUniversal({ client, session, el }) {
     if (!el) throw new Error('attachUniversal: missing <video>');
     el.muted = !!muted;
 
+    // direct client helpers
     if (typeof client.attachToElement === 'function') {
       await client.attachToElement(el);
       await el.play?.().catch(() => {});
@@ -125,6 +140,7 @@ export default function EmbedPage() {
       return true;
     }
 
+    // media getters
     for (const key of ['getRemoteMediaStream', 'getMediaStream']) {
       if (typeof client[key] === 'function') {
         const ms = await client[key]();
@@ -132,6 +148,7 @@ export default function EmbedPage() {
       }
     }
 
+    // session helpers / raw streams
     if (session) {
       for (const k of ['attachToElement', 'attachElement']) {
         if (typeof session[k] === 'function') {
@@ -144,6 +161,7 @@ export default function EmbedPage() {
       if (ms) { el.srcObject = ms; await el.play?.().catch(() => {}); return true; }
     }
 
+    // livekit path
     const room = client.room || session?.room || client.livekit?.room;
     if (room) {
       await attachFromLiveKitRoom(room, el);
@@ -153,6 +171,7 @@ export default function EmbedPage() {
     throw new Error('No attach function or MediaStream available');
   }
 
+  // --- Start / Stop avatar ---
   async function startAvatar() {
     if (startingRef.current) return;
     startingRef.current = true;
@@ -161,13 +180,15 @@ export default function EmbedPage() {
       const Ctor = await loadHeygenSdk();
 
       setNote('Fetching token + avatar id…');
-      const { token, avatarName } = await getTokenAndAvatar();
+      const { token, avatarId } = await getTokenAndAvatar();
 
-      setStatus('starting'); setNote(`Starting ${avatarName}…`);
+      setStatus('starting'); setNote(`Starting ${avatarId}…`);
 
       const client = new Ctor({ token });
+
+      // NOTE: HeyGen's method still expects the property name "avatarName"
       const session = await client.createStartAvatar({
-        avatarName,
+        avatarName: avatarId,
         quality: 'high',
         version: 'v3',
       });
@@ -199,6 +220,7 @@ export default function EmbedPage() {
     } catch {}
   }
 
+  // --- Retell text chat (start once, then send) ---
   async function ensureChat() {
     if (chatId) return chatId;
     const r = await fetch('/api/retell-chat/start', { cache: 'no-store' });
