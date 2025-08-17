@@ -1,50 +1,74 @@
+// /app/lib/loadHeygenSdk.js
 // Loads the HeyGen Streaming Avatar SDK in the browser.
-// 1) Try the local shim (public/heygen.umd.js) which sets window.HeyGenStreamingAvatar
-// 2) Fallback to UMD CDNs
-// 3) Last resort: dynamic ESM import from esm.sh
+// Strategy:
+// 1) Try local proxy:  /api/heygen-sdk
+// 2) If that somehow fails, try ESM dynamic import as last resort.
 
-function loadScript(src, timeoutMs = 6000) {
+let cachedCtor = null;
+
+function injectScriptOnce(src, checkReady, timeoutMs = 12000) {
   return new Promise((resolve, reject) => {
+    // If already present & ready, resolve immediately
+    try {
+      const ready = checkReady?.();
+      if (ready) return resolve(ready);
+    } catch {}
+
     const s = document.createElement('script');
-    s.src = src;
     s.async = true;
-    s.onload = () => resolve(true);
+    s.src = src;
+
+    const onDone = () => {
+      try {
+        const ready = checkReady?.();
+        if (ready) resolve(ready);
+        else reject(new Error('script loaded but global not found'));
+      } catch (e) {
+        reject(e);
+      }
+    };
+
+    s.onload = onDone;
     s.onerror = () => reject(new Error(`script failed: ${src}`));
+
     document.head.appendChild(s);
-    setTimeout(() => reject(new Error('shim timeout')), timeoutMs);
+
+    setTimeout(() => reject(new Error('script timeout')), timeoutMs);
   });
 }
 
-export async function loadHeygenSdk() {
-  // Try local shim (this will ESM-import and set a global)
-  try {
-    await loadScript('/heygen.umd.js?v=' + Date.now());
-    if (window.HeyGenStreamingAvatar) return window.HeyGenStreamingAvatar;
-  } catch {}
+function pickCtorFromGlobal() {
+  // Try common global names the UMD may expose
+  return (
+    window.HeyGenStreamingAvatar ||
+    (window.HeyGen && (window.HeyGen.StreamingAvatar || window.HeyGen.streamingAvatar)) ||
+    window.streamingAvatar ||
+    null
+  );
+}
 
-  // UMD CDNs
-  const cdnUrls = [
-    'https://cdn.jsdelivr.net/npm/@heygen/streaming-avatar@2.0.16/dist/index.umd.js',
-    'https://unpkg.com/@heygen/streaming-avatar@2.0.16/dist/index.umd.js',
-    'https://ga.jspm.io/npm:@heygen/streaming-avatar@2.0.16/dist/index.umd.js',
-  ];
-  for (const u of cdnUrls) {
-    try {
-      await loadScript(u);
-      if (window.HeyGenStreamingAvatar) return window.HeyGenStreamingAvatar;
-    } catch (e) {
-      console.warn('[heygen loader] failed:', u, e.message);
+export async function loadHeygenSdk() {
+  if (cachedCtor) return cachedCtor;
+
+  // 1) Local proxy (avoids CSP/external CDN failures)
+  try {
+    const ctor = await injectScriptOnce('/api/heygen-sdk', pickCtorFromGlobal);
+    if (ctor) {
+      cachedCtor = ctor;
+      return ctor;
     }
+    // fall through to ESM import
+  } catch (e) {
+    console.warn('[heygen loader] proxy failed:', e?.message);
   }
 
-  // ESM fallback
+  // 2) Last-resort ESM dynamic import (may be blocked by CSP)
   try {
-    const url = 'https://esm.sh/@heygen/streaming-avatar@2.0.16?bundle&target=es2017';
-    const m = await import(url);
-    return m.default || m;
+    const m = await import('https://esm.sh/@heygen/streaming-avatar@2.0.16?bundle&target=es2017');
+    cachedCtor = m.default || m.StreamingAvatar || m;
+    return cachedCtor;
   } catch (e) {
     console.error('[heygen loader] ESM import failed', e);
+    throw new Error('Failed to load HeyGen Streaming Avatar SDK from all sources.');
   }
-
-  throw new Error('Failed to load HeyGen Streaming Avatar SDK from all sources.');
 }
