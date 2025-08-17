@@ -1,11 +1,10 @@
-export const dynamic = 'force-dynamic';
+// /app/api/heygen-avatars/route.js
+// Returns the avatar *ID* straight from your Vercel env var: HEYGEN_AVATAR_ID
 
 export async function GET() {
-  const byId = process.env.HEYGEN_AVATAR_ID?.trim();
-  if (byId) return Response.json({ ok: true, id: byId, source: 'env_id', nameHint: '' });
-
-  const byName = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_NAME?.trim();
-  if (byName) return Response.json({ ok: true, id: byName, source: 'env_name', nameHint: '' });
-
-  return Response.json({ ok: false, error: 'no_avatar_id' }, { status: 404 });
+  const id = process.env.HEYGEN_AVATAR_ID || '';
+  return new Response(
+    JSON.stringify({ id }),
+    { headers: { 'Content-Type': 'application/json' } }
+  );
 }
