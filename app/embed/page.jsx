@@ -19,7 +19,6 @@ export default function EmbedPage() {
   const pushChat = (role, text) =>
     setChat(prev => [...prev, { role, text, t: Date.now() }]);
 
-  // --- Token + AvatarId from our API routes / env ---
   async function getTokenAndAvatar() {
     const [tokRes, avRes] = await Promise.all([
       fetch('/api/heygen-token', { cache: 'no-store' }),
@@ -27,32 +26,21 @@ export default function EmbedPage() {
     ]);
     const tok = await tokRes.json().catch(() => ({}));
     const av = await avRes.json().catch(() => ({}));
-
-    const token =
-      tok?.token ||
-      tok?.access_token ||
-      tok?.data?.token ||
-      '';
-
-    // Use the ID returned by /api/heygen-avatars; fallback to NEXT_PUBLIC_HEYGEN_AVATAR_NAME if present
-    const avatarId = av?.id || process.env.NEXT_PUBLIC_HEYGEN_AVATAR_NAME || '';
-
+    const token = tok?.token || tok?.access_token || tok?.data?.token;
+    const avatarName = av?.id || av?.avatarName || av?.name;
     if (!token) throw new Error('No token from /api/heygen-token');
-    if (!avatarId) throw new Error('No avatar id from /api/heygen-avatars');
-
-    // helpful for debugging in the browser
-    window.__HEYGEN_DEBUG__ = { tokenLen: String(token).length, avatarId };
-
-    return { token, avatarId };
+    if (!avatarName) throw new Error('No avatar id from /api/heygen-avatars');
+    window.__HEYGEN_DEBUG__ = { token, avatarName, tokenLen: String(token).length };
+    return { token, avatarName };
   }
 
-  // --- LiveKit attach helper (poll for a remote video track) ---
+  // ---- LiveKit helper (poll for first remote video track) ----
   async function attachFromLiveKitRoom(room, el) {
     return new Promise((resolve, reject) => {
       if (!room) return reject(new Error('no room'));
       let done = false;
-      const TIMEOUT_MS = 31000;
       const started = Date.now();
+      const TIMEOUT_MS = 31000;
 
       const useTrack = (track) => {
         try {
@@ -95,7 +83,6 @@ export default function EmbedPage() {
       const onTrackPublished = (pub) => {
         if (!done && pub?.kind === 'video' && pub.track) useTrack(pub.track);
       };
-
       const cleanup = () => {
         try { room.off?.('trackSubscribed', onTrackSubscribed); } catch {}
         try { room.off?.('trackPublished', onTrackPublished); } catch {}
@@ -123,12 +110,12 @@ export default function EmbedPage() {
     });
   }
 
-  // --- Universal attach (covers multiple SDK shapes) ---
+  // ---- Universal attach: covers multiple SDK shapes (including direct props) ----
   async function attachUniversal({ client, session, el }) {
     if (!el) throw new Error('attachUniversal: missing <video>');
     el.muted = !!muted;
 
-    // direct client helpers
+    // Official client methods
     if (typeof client.attachToElement === 'function') {
       await client.attachToElement(el);
       await el.play?.().catch(() => {});
@@ -140,7 +127,7 @@ export default function EmbedPage() {
       return true;
     }
 
-    // media getters
+    // Client getters
     for (const key of ['getRemoteMediaStream', 'getMediaStream']) {
       if (typeof client[key] === 'function') {
         const ms = await client[key]();
@@ -148,7 +135,14 @@ export default function EmbedPage() {
       }
     }
 
-    // session helpers / raw streams
+    // NEW: direct MediaStream on client (seen in logs)
+    if (client.mediaStream && typeof client.mediaStream.getTracks === 'function') {
+      el.srcObject = client.mediaStream;
+      await el.play?.().catch(() => {});
+      return true;
+    }
+
+    // Session helpers / direct streams
     if (session) {
       for (const k of ['attachToElement', 'attachElement']) {
         if (typeof session[k] === 'function') {
@@ -161,7 +155,7 @@ export default function EmbedPage() {
       if (ms) { el.srcObject = ms; await el.play?.().catch(() => {}); return true; }
     }
 
-    // livekit path
+    // LiveKit room
     const room = client.room || session?.room || client.livekit?.room;
     if (room) {
       await attachFromLiveKitRoom(room, el);
@@ -171,7 +165,7 @@ export default function EmbedPage() {
     throw new Error('No attach function or MediaStream available');
   }
 
-  // --- Start / Stop avatar ---
+  // ---- Start / Stop ----
   async function startAvatar() {
     if (startingRef.current) return;
     startingRef.current = true;
@@ -180,15 +174,13 @@ export default function EmbedPage() {
       const Ctor = await loadHeygenSdk();
 
       setNote('Fetching token + avatar id…');
-      const { token, avatarId } = await getTokenAndAvatar();
+      const { token, avatarName } = await getTokenAndAvatar();
 
-      setStatus('starting'); setNote(`Starting ${avatarId}…`);
+      setStatus('starting'); setNote(`Starting ${avatarName}…`);
 
       const client = new Ctor({ token });
-
-      // NOTE: HeyGen's method still expects the property name "avatarName"
       const session = await client.createStartAvatar({
-        avatarName: avatarId,
+        avatarName,
         quality: 'high',
         version: 'v3',
       });
@@ -220,7 +212,7 @@ export default function EmbedPage() {
     } catch {}
   }
 
-  // --- Retell text chat (start once, then send) ---
+  // ---- Retell text chat ----
   async function ensureChat() {
     if (chatId) return chatId;
     const r = await fetch('/api/retell-chat/start', { cache: 'no-store' });
